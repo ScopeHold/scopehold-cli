@@ -6,16 +6,17 @@ The CLI is a thin wrapper around ScopeHold's public API. It is the recommended p
 
 ## Install
 
-Early public install from GitHub:
-
-```sh
-npm install -g github:ScopeHold/scopehold-cli
-```
-
-After the npm package is published:
+Install from npm:
 
 ```sh
 npm install -g @scopehold/cli
+```
+
+If npm installs successfully but your shell cannot find `scopehold`, check the global npm prefix:
+
+```sh
+npm prefix -g
+<prefix>/bin/scopehold --help
 ```
 
 Check the install:
