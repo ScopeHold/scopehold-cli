@@ -2,11 +2,10 @@
 
 import { spawn } from "node:child_process";
 import { constants as fsConstants } from "node:fs";
-import { access, chmod, cp, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import process from "node:process";
-import { fileURLToPath } from "node:url";
 
 import { resolveScopeHoldSecret, ScopeHoldResolveError, type ResolveSecretResult } from "./resolve-client.js";
 
@@ -96,7 +95,6 @@ const scopeHoldDirName = ".scopehold";
 const credentialsFileName = "credentials.json";
 const userConfigFileName = "config.json";
 const projectConfigFileName = ".scopehold.json";
-const skillName = "scopehold-agent";
 const defaultApiUrl = "https://api.scopehold.com";
 
 class CliError extends Error {
@@ -115,7 +113,6 @@ const commands: Record<string, CommandHandler> = {
   inventory: inventoryCommand,
   resolve: resolveCommand,
   exec: execCommand,
-  skill: skillCommand,
   agent: agentCommand
 };
 
@@ -128,7 +125,6 @@ Commands:
   inventory         List secret metadata available to the selected Agent Key
   resolve           Resolve one secret by provider/name
   exec              Run a command with mapped secrets injected as environment variables
-  skill install     Install the bundled ScopeHold agent skill locally
 
 Global options:
   --profile <name>  Local ScopeHold profile name
@@ -161,7 +157,7 @@ function parseArgs(argv: string[]): ParsedArgs {
       throw new CliError("Invalid option.", 2);
     }
 
-    if (name === "help" || name === "json" || name === "metadata" || name === "force") {
+    if (name === "help" || name === "json" || name === "metadata") {
       options[name] = true;
       continue;
     }
@@ -712,162 +708,6 @@ async function execCommand(context: CliContext): Promise<void> {
   });
 
   process.exit(exitCode);
-}
-
-function packageRootDir(): string {
-  return path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-}
-
-function bundledSkillDir(): string {
-  return path.join(packageRootDir(), "skills", skillName);
-}
-
-function expandUserPath(value: string, context: CliContext): string {
-  const expanded = value === "~" || value.startsWith("~/") ? path.join(context.homeDir, value.slice(2)) : value;
-  return path.isAbsolute(expanded) ? expanded : path.resolve(context.cwd, expanded);
-}
-
-function skillTargetParents(context: CliContext): Array<{ label: string; parentDir: string }> {
-  const targetDir = optionString(context.parsed.options, "target-dir");
-  if (targetDir) {
-    return [
-      {
-        label: "custom",
-        parentDir: expandUserPath(targetDir, context)
-      }
-    ];
-  }
-
-  const target = optionString(context.parsed.options, "target") ?? "codex";
-  if (target === "codex") {
-    return [
-      {
-        label: "codex",
-        parentDir: path.join(context.homeDir, ".codex", "skills")
-      }
-    ];
-  }
-
-  if (target === "agents") {
-    return [
-      {
-        label: "agents",
-        parentDir: path.join(context.homeDir, ".agents", "skills")
-      }
-    ];
-  }
-
-  if (target === "both") {
-    return [
-      {
-        label: "codex",
-        parentDir: path.join(context.homeDir, ".codex", "skills")
-      },
-      {
-        label: "agents",
-        parentDir: path.join(context.homeDir, ".agents", "skills")
-      }
-    ];
-  }
-
-  throw new CliError("--target must be codex, agents, or both.", 2);
-}
-
-async function installSkillCopy(input: {
-  sourceDir: string;
-  parentDir: string;
-  force: boolean;
-}): Promise<{
-  name: string;
-  parentDir: string;
-  skillDir: string;
-  status: "installed" | "already_installed" | "replaced";
-}> {
-  const sourceSkillPath = path.join(input.sourceDir, "SKILL.md");
-  const skillDir = path.join(input.parentDir, skillName);
-  const installedSkillPath = path.join(skillDir, "SKILL.md");
-
-  if (!(await pathExists(sourceSkillPath))) {
-    throw new CliError("Bundled ScopeHold agent skill was not found in this CLI package.");
-  }
-
-  let status: "installed" | "already_installed" | "replaced" = "installed";
-  if (await pathExists(skillDir)) {
-    const sourceSkill = await readFile(sourceSkillPath, "utf8");
-    const installedSkill = (await pathExists(installedSkillPath)) ? await readFile(installedSkillPath, "utf8") : null;
-
-    if (installedSkill === sourceSkill) {
-      return {
-        name: skillName,
-        parentDir: input.parentDir,
-        skillDir,
-        status: "already_installed"
-      };
-    }
-
-    if (!input.force) {
-      throw new CliError(
-        `${skillDir} already exists and differs from the bundled ScopeHold skill. Re-run with --force to replace it.`,
-        2
-      );
-    }
-
-    await rm(skillDir, {
-      recursive: true,
-      force: true
-    });
-    status = "replaced";
-  }
-
-  await mkdir(input.parentDir, {
-    recursive: true
-  });
-  await cp(input.sourceDir, skillDir, {
-    recursive: true,
-    force: false
-  });
-
-  return {
-    name: skillName,
-    parentDir: input.parentDir,
-    skillDir,
-    status
-  };
-}
-
-async function skillCommand(context: CliContext): Promise<void> {
-  const subcommand = context.parsed.args.shift();
-  if (subcommand !== "install") {
-    throw new CliError("Usage: scopehold skill install [--target codex|agents|both] [--target-dir <dir>] [--force]", 2);
-  }
-
-  const results: Array<Awaited<ReturnType<typeof installSkillCopy>>> = [];
-  const sourceDir = bundledSkillDir();
-  const force = optionBoolean(context.parsed.options, "force");
-  for (const target of skillTargetParents(context)) {
-    results.push(
-      await installSkillCopy({
-        sourceDir,
-        parentDir: target.parentDir,
-        force
-      })
-    );
-  }
-
-  if (optionBoolean(context.parsed.options, "json")) {
-    context.stdout.write(`${JSON.stringify({ skill: skillName, results }, null, 2)}\n`);
-    return;
-  }
-
-  for (const result of results) {
-    if (result.status === "already_installed") {
-      context.stdout.write(`ScopeHold agent skill already installed: ${result.skillDir}\n`);
-    } else if (result.status === "replaced") {
-      context.stdout.write(`Replaced ScopeHold agent skill: ${result.skillDir}\n`);
-    } else {
-      context.stdout.write(`Installed ScopeHold agent skill: ${result.skillDir}\n`);
-    }
-  }
 }
 
 async function agentCommand(context: CliContext): Promise<void> {

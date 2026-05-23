@@ -37,13 +37,7 @@ command -v scopehold
 ```
 
 5. If npm reports a successful install but `command -v scopehold` is still empty, run `npm prefix -g` and use `<prefix>/bin/scopehold` for the remaining ScopeHold commands in this task.
-6. If the runtime supports Codex/OpenAI skills and the skill is not already installed, install or refresh the bundled skill:
-
-```sh
-scopehold skill install
-```
-
-Use `scopehold skill install --target-dir "<skills-dir>"` only when the runtime uses a non-default skills directory.
+6. If the runtime supports reusable skills, rules, or instruction files, install or register official ScopeHold Agent Guidance using that runtime's normal mechanism. This is optional and must not block CLI or API secret resolution.
 7. If the CLI is available, redeem the prompt exactly into the assigned profile:
 
 ```sh
