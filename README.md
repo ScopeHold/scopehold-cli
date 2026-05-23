@@ -33,6 +33,7 @@ scopehold status --profile "<profile>"
 scopehold inventory --profile "<profile>"
 scopehold resolve openai/api_key --profile "<profile>"
 scopehold exec -- npm test
+scopehold skill install
 ```
 
 ## Local Files
@@ -85,6 +86,22 @@ skills/scopehold-agent/SKILL.md
 ```
 
 Use it when an agent receives a ScopeHold provisioning prompt, Agent Key, CLI profile, `.scopehold.json` config, or needs to list or resolve ScopeHold-managed secrets safely.
+
+Install the bundled skill into the default Codex user skill directory:
+
+```sh
+scopehold skill install
+```
+
+Install somewhere else:
+
+```sh
+scopehold skill install --target agents
+scopehold skill install --target both
+scopehold skill install --target-dir "/path/to/skills"
+```
+
+If a local `scopehold-agent` skill already exists and differs from the package, the command stops instead of overwriting it. Use `--force` when you intentionally want to replace the existing local copy.
 
 ## API Fallback
 

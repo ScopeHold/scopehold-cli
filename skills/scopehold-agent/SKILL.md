@@ -37,15 +37,22 @@ command -v scopehold
 ```
 
 5. If npm reports a successful install but `command -v scopehold` is still empty, run `npm prefix -g` and use `<prefix>/bin/scopehold` for the remaining ScopeHold commands in this task.
-6. If the CLI is available, redeem the prompt exactly into the assigned profile:
+6. If the runtime supports Codex/OpenAI skills and the skill is not already installed, install or refresh the bundled skill:
+
+```sh
+scopehold skill install
+```
+
+Use `scopehold skill install --target-dir "<skills-dir>"` only when the runtime uses a non-default skills directory.
+7. If the CLI is available, redeem the prompt exactly into the assigned profile:
 
 ```sh
 scopehold agent provision --url "<provisioning-url>" --token "<one-time-token>" --profile "<assigned-profile>"
 scopehold status --profile "<assigned-profile>"
 ```
 
-7. If the human selected API-only, or the CLI is unavailable and cannot be installed, use the complete API fallback in the setup prompt. Keep the returned Agent Key in the runtime's secure secret store for the assigned profile, or in a temporary shell variable only for the current run when no secure store exists.
-8. Discard the one-time provisioning token after redemption.
+8. If the human selected API-only, or the CLI is unavailable and cannot be installed, use the complete API fallback in the setup prompt. Keep the returned Agent Key in the runtime's secure secret store for the assigned profile, or in a temporary shell variable only for the current run when no secure store exists.
+9. Discard the one-time provisioning token after redemption.
 
 ## Project Config
 
