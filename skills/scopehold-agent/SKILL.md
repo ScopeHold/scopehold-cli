@@ -13,6 +13,7 @@ Use ScopeHold to resolve only the secrets required for the current task. Never a
 - Store long-lived Agent Keys only through the official ScopeHold CLI profile flow or the runtime's secure secret store.
 - Store project context in `.scopehold.json` only when it contains no secrets.
 - Prefer `scopehold inventory` before resolving so you only request task-required secrets.
+- Prefer `scopehold exec` when `.scopehold.json` maps the required secrets and the target command can receive secrets through environment variables.
 - Use `scopehold resolve` only when a secret value is required for the current task.
 - If access is denied or a secret is missing, ask the human to grant access in ScopeHold.
 
@@ -21,7 +22,7 @@ Use ScopeHold to resolve only the secrets required for the current task. Never a
 When given a ScopeHold setup prompt:
 
 1. Read the assigned `ScopeHold CLI profile` from the prompt.
-2. Check whether the human selected CLI or API-only operation. Use API-only when the human explicitly requests it. Otherwise, use the recommended CLI path.
+2. If the human has not selected a path, say that ScopeHold supports either the recommended CLI path or API-only operation. Explain that the CLI is recommended because it stores the Agent Key in a named local profile and can inject mapped secrets into commands without writing resolved values to disk.
 3. Check whether the CLI is installed:
 
 ```sh
@@ -54,7 +55,13 @@ Use the nearest `.scopehold.json` when present. It may define:
   "apiUrl": "https://api.scopehold.com",
   "profile": "scopehold-agent-name-abc123",
   "workspaceSlug": "workspace",
-  "projectSlug": "project"
+  "projectSlug": "project",
+  "secrets": {
+    "OPENAI_API_KEY": {
+      "provider": "openai",
+      "name": "api_key"
+    }
+  }
 }
 ```
 
@@ -66,6 +73,12 @@ List accessible secrets:
 
 ```sh
 scopehold inventory
+```
+
+Run a command with mapped secrets injected:
+
+```sh
+scopehold exec -- npm test
 ```
 
 Resolve one specific secret:
@@ -91,5 +104,7 @@ curl "$SCOPEHOLD_API_URL/resolve" \
   -H "Content-Type: application/json" \
   -d '{"provider":"<provider-slug>","name":"<secret-name>","environment":"<optional-environment>"}'
 ```
+
+The API can mirror the underlying resolve calls, but it cannot launch a local process or inject environment variables by itself. For API-only operation, resolve the required values and set environment variables through the runtime's own secure mechanism.
 
 Clear temporary shell variables and resolved secret values after the task. Keep the assigned CLI profile unless the human asks for rotation or revocation.

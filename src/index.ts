@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { spawn } from "node:child_process";
 import { constants as fsConstants } from "node:fs";
 import { access, chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -47,6 +48,13 @@ type RuntimeConfig = {
   workspaceSlug?: string;
   projectId?: string;
   projectSlug?: string;
+  secrets?: Record<string, SecretMapping>;
+};
+
+type SecretMapping = {
+  provider: string;
+  name: string;
+  environment?: string;
 };
 
 type RuntimeContext = {
@@ -104,6 +112,7 @@ const commands: Record<string, CommandHandler> = {
   status: statusCommand,
   inventory: inventoryCommand,
   resolve: resolveCommand,
+  exec: execCommand,
   agent: agentCommand
 };
 
@@ -115,6 +124,7 @@ Commands:
   status            Show selected profile and project config without printing secrets
   inventory         List secret metadata available to the selected Agent Key
   resolve           Resolve one secret by provider/name
+  exec              Run a command with mapped secrets injected as environment variables
 
 Global options:
   --profile <name>  Local ScopeHold profile name
@@ -123,7 +133,7 @@ Global options:
   --help            Show help
 
 Project config:
-  The CLI reads the nearest ${projectConfigFileName}. Store only non-secret context there.
+  scopehold exec reads the nearest ${projectConfigFileName}. Store only non-secret context there.
 `;
 }
 
@@ -311,7 +321,24 @@ function parseProjectConfig(payload: unknown, configPath: string): RuntimeConfig
   };
 
   if ("secrets" in record) {
-    throw new CliError(`${configPath} secrets mappings are not supported in the public CLI V1.`);
+    const secrets = assertRecord(record.secrets, `${configPath} secrets`);
+    config.secrets = {};
+
+    for (const [envName, rawMapping] of Object.entries(secrets)) {
+      const mapping = assertRecord(rawMapping, `${configPath} secrets.${envName}`);
+      const provider = optionalStringRecord(mapping, "provider");
+      const name = optionalStringRecord(mapping, "name");
+
+      if (!provider || !name) {
+        throw new CliError(`${configPath} secrets.${envName} requires provider and name.`);
+      }
+
+      config.secrets[envName] = {
+        provider,
+        name,
+        environment: optionalStringRecord(mapping, "environment")
+      };
+    }
   }
 
   return config;
@@ -456,6 +483,7 @@ async function statusCommand(context: CliContext): Promise<void> {
           profile: project.config.profile ?? null,
           workspaceSlug: project.config.workspaceSlug ?? null,
           projectSlug: project.config.projectSlug ?? null,
+          secretCount: Object.keys(project.config.secrets ?? {}).length,
           hasContext: Boolean(
             project.config.workspaceId ??
               project.config.workspaceSlug ??
@@ -491,6 +519,7 @@ async function statusCommand(context: CliContext): Promise<void> {
     context.stdout.write(`Project config: ${payload.projectConfig.path}\n`);
     context.stdout.write(`Project profile: ${payload.projectConfig.profile ?? "not set"}\n`);
     context.stdout.write(`Project context: ${payload.projectConfig.hasContext ? "set" : "not set"}\n`);
+    context.stdout.write(`Mapped secrets: ${payload.projectConfig.secretCount}\n`);
   } else {
     context.stdout.write(`Project config: not found (${projectConfigFileName})\n`);
   }
@@ -640,6 +669,45 @@ async function resolveCommand(context: CliContext): Promise<void> {
   }
 
   context.stdout.write(`${serializeSecretValue(result)}\n`);
+}
+
+async function execCommand(context: CliContext): Promise<void> {
+  if (context.parsed.afterDoubleDash.length === 0) {
+    throw new CliError("exec requires a command after --.", 2);
+  }
+
+  const runtime = await resolveRuntimeContext(context);
+  if (!runtime.configPath || !runtime.config) {
+    throw new CliError(`exec requires a ${projectConfigFileName} project config.`, 2);
+  }
+
+  const secrets = runtime.config.secrets ?? {};
+  const childEnv: NodeJS.ProcessEnv = {
+    ...context.env
+  };
+
+  for (const [envName, mapping] of Object.entries(secrets)) {
+    const result = await resolveOne({
+      runtime,
+      secret: mapping,
+      options: context.parsed.options
+    });
+    childEnv[envName] = serializeSecretValue(result);
+  }
+
+  const [command, ...args] = context.parsed.afterDoubleDash;
+  const child = spawn(command!, args, {
+    stdio: "inherit",
+    env: childEnv,
+    cwd: context.cwd
+  });
+
+  const exitCode = await new Promise<number>((resolve, reject) => {
+    child.on("error", reject);
+    child.on("close", (code) => resolve(code ?? 1));
+  });
+
+  process.exit(exitCode);
 }
 
 async function agentCommand(context: CliContext): Promise<void> {

@@ -31,6 +31,7 @@ scopehold agent provision --url "<provisioning-url>" --token "<one-time-token>" 
 scopehold status --profile "<profile>"
 scopehold inventory --profile "<profile>"
 scopehold resolve openai/api_key --profile "<profile>"
+scopehold exec -- npm test
 ```
 
 ## Local Files
@@ -45,18 +46,34 @@ The CLI stores long-lived Agent Key material under the user's home directory, ou
 
 The directory is written with `0700` permissions. Credential files are written with `0600` permissions.
 
-Project-local `.scopehold.json` files must contain only non-secret context:
+Project-local `.scopehold.json` files must contain only non-secret context and optional env-var-to-secret mappings:
 
 ```json
 {
   "apiUrl": "https://api.scopehold.com",
   "profile": "scopehold-agent-abc123",
   "workspaceSlug": "workspace",
-  "projectSlug": "project"
+  "projectSlug": "project",
+  "secrets": {
+    "OPENAI_API_KEY": {
+      "provider": "openai",
+      "name": "api_key"
+    }
+  }
 }
 ```
 
 Do not store Agent Keys, provider secret values, OAuth credentials, database URLs, or credential payloads in `.scopehold.json`.
+
+## Exec
+
+`scopehold exec` resolves the mapped secrets in `.scopehold.json`, injects them into the child process environment, and does not write resolved values to disk:
+
+```sh
+scopehold exec -- npm test
+```
+
+The API can mirror the underlying resolve calls, but it cannot launch a local process or inject environment variables by itself. API-only agents can reproduce the outcome by resolving each required secret through `/resolve` and setting environment variables in their own runtime.
 
 ## Agent Skill
 
