@@ -1,0 +1,36 @@
+{
+  "name": "@scopehold/cli",
+  "version": "0.1.0",
+  "description": "Official ScopeHold CLI and agent skill for provisioning agent profiles and resolving ScopeHold-managed secrets.",
+  "license": "MIT",
+  "homepage": "https://github.com/ScopeHold/scopehold-cli#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ScopeHold/scopehold-cli.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ScopeHold/scopehold-cli/issues"
+  },
+  "type": "module",
+  "bin": {
+    "scopehold": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "skills",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepare": "npm run build",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.8.3"
+  }
+}
