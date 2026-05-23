@@ -21,28 +21,29 @@ Use ScopeHold to resolve only the secrets required for the current task. Never a
 When given a ScopeHold setup prompt:
 
 1. Read the assigned `ScopeHold CLI profile` from the prompt.
-2. Check whether the CLI is installed:
+2. Check whether the human selected CLI or API-only operation. Use API-only when the human explicitly requests it. Otherwise, use the recommended CLI path.
+3. Check whether the CLI is installed:
 
 ```sh
 command -v scopehold
 ```
 
-3. If the CLI is missing and the runtime can install Node packages, install from the official public repo, then rerun the command check:
+4. If the CLI is missing and the runtime can install Node packages, install from the official public repo, then rerun the command check:
 
 ```sh
 npm install -g github:ScopeHold/scopehold-cli
 command -v scopehold
 ```
 
-4. If the CLI is available, redeem the prompt exactly into the assigned profile:
+5. If the CLI is available, redeem the prompt exactly into the assigned profile:
 
 ```sh
 scopehold agent provision --url "<provisioning-url>" --token "<one-time-token>" --profile "<assigned-profile>"
 scopehold status --profile "<assigned-profile>"
 ```
 
-5. If the CLI is unavailable and cannot be installed, use the complete API fallback in the setup prompt. Keep the returned Agent Key in the runtime's secure secret store for the assigned profile, or in a temporary shell variable only for the current run when no secure store exists.
-6. Discard the one-time provisioning token after redemption.
+6. If the human selected API-only, or the CLI is unavailable and cannot be installed, use the complete API fallback in the setup prompt. Keep the returned Agent Key in the runtime's secure secret store for the assigned profile, or in a temporary shell variable only for the current run when no secure store exists.
+7. Discard the one-time provisioning token after redemption.
 
 ## Project Config
 

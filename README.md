@@ -2,7 +2,7 @@
 
 Official ScopeHold CLI and agent skill for provisioning agent profiles, listing accessible secrets, and resolving ScopeHold-managed credentials from local developer and agent runtimes.
 
-The CLI is a thin wrapper around ScopeHold's public API. The same provisioning, inventory, and resolve workflows remain available through direct API calls when the CLI cannot be installed.
+The CLI is a thin wrapper around ScopeHold's public API. It is the recommended path because it gives agents a repeatable local profile and restrictive credential-file permissions. The same provisioning, inventory, and resolve workflows remain available through direct API calls when a user chooses API-only operation or the CLI cannot be installed.
 
 ## Install
 
