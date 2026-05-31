@@ -8,6 +8,7 @@ import path from "node:path";
 import process from "node:process";
 
 import { resolveScopeHoldSecret, ScopeHoldResolveError, type ResolveSecretResult } from "./resolve-client.js";
+import { createChildEnvWithMappedSecrets, redactSensitiveText } from "./security.js";
 
 type CommandHandler = (context: CliContext) => Promise<void>;
 
@@ -262,7 +263,12 @@ async function writePrivateJson(filePath: string, payload: unknown): Promise<voi
 }
 
 async function readCredentials(homeDir: string): Promise<CredentialsStore> {
-  const store = await readJsonFile<CredentialsStore>(credentialsPath(homeDir));
+  const filePath = credentialsPath(homeDir);
+  if (await pathExists(filePath)) {
+    await chmod(filePath, 0o600);
+  }
+
+  const store = await readJsonFile<CredentialsStore>(filePath);
   if (!store) {
     return {
       version: 1,
@@ -565,7 +571,7 @@ async function fetchJson(input: {
       // Preserve fallback message.
     }
 
-    throw new CliError(message, response.status === 400 ? 2 : 1);
+    throw new CliError(redactSensitiveText(message), response.status === 400 ? 2 : 1);
   }
 
   return response.json();
@@ -682,9 +688,7 @@ async function execCommand(context: CliContext): Promise<void> {
   }
 
   const secrets = runtime.config.secrets ?? {};
-  const childEnv: NodeJS.ProcessEnv = {
-    ...context.env
-  };
+  const mappedSecrets: Record<string, string> = {};
 
   for (const [envName, mapping] of Object.entries(secrets)) {
     const result = await resolveOne({
@@ -692,8 +696,10 @@ async function execCommand(context: CliContext): Promise<void> {
       secret: mapping,
       options: context.parsed.options
     });
-    childEnv[envName] = serializeSecretValue(result);
+    mappedSecrets[envName] = serializeSecretValue(result);
   }
+
+  const childEnv = createChildEnvWithMappedSecrets(context.env, mappedSecrets);
 
   const [command, ...args] = context.parsed.afterDoubleDash;
   const child = spawn(command!, args, {
@@ -801,15 +807,15 @@ async function main(): Promise<void> {
 
 main().catch((error: unknown) => {
   if (error instanceof ScopeHoldResolveError) {
-    console.error(error.message);
+    console.error(redactSensitiveText(error.message));
     process.exit(error.status === 400 ? 2 : 1);
   }
 
   if (error instanceof CliError) {
-    console.error(error.message);
+    console.error(redactSensitiveText(error.message));
     process.exit(error.code);
   }
 
-  console.error(error instanceof Error ? error.message : "ScopeHold CLI failed.");
+  console.error(error instanceof Error ? redactSensitiveText(error.message) : "ScopeHold CLI failed.");
   process.exit(1);
 });
