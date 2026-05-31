@@ -76,6 +76,8 @@ scopehold exec -- npm test
 
 The API can mirror the underlying resolve calls, but it cannot launch a local process or inject environment variables by itself. API-only agents can reproduce the outcome by resolving each required secret through `/resolve` and setting environment variables in their own runtime.
 
+The CLI removes ScopeHold Agent Key environment variables before launching the child process. Only the secrets mapped in `.scopehold.json` are added to the child process environment.
+
 ## Agent Skill
 
 The npm package includes reusable ScopeHold Agent Guidance at:
