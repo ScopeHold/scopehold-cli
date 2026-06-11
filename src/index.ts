@@ -3,9 +3,10 @@
 import { spawn } from "node:child_process";
 import { constants as fsConstants } from "node:fs";
 import { access, chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
+import { hostname, homedir } from "node:os";
 import path from "node:path";
 import process from "node:process";
+import { setTimeout as sleep } from "node:timers/promises";
 
 import { resolveScopeHoldSecret, ScopeHoldResolveError, type ResolveSecretResult } from "./resolve-client.js";
 import { createChildEnvWithMappedSecrets, redactSensitiveText } from "./security.js";
@@ -35,7 +36,12 @@ type CredentialsStore = {
 
 type StoredProfile = {
   apiUrl: string;
-  token: string;
+  authType?: "agent_key" | "oauth";
+  token?: string;
+  accessToken?: string;
+  refreshToken?: string;
+  accessTokenExpiresAt?: string;
+  tokenType?: string;
   agentId?: string;
   agentName?: string;
   createdAt: string;
@@ -92,6 +98,40 @@ type ProvisionResponse = {
   token?: string;
 };
 
+type OAuthAuthorizationServerMetadata = {
+  issuer: string;
+  device_authorization_endpoint: string;
+  token_endpoint: string;
+  revocation_endpoint: string;
+};
+
+type DeviceAuthorizationResponse = {
+  device_code: string;
+  user_code: string;
+  verification_uri: string;
+  verification_uri_complete?: string;
+  expires_in: number;
+  interval?: number;
+};
+
+type OAuthTokenResponse = {
+  access_token: string;
+  refresh_token: string;
+  token_type: string;
+  expires_in: number;
+  agent?: {
+    id: string;
+    displayName: string;
+    workspaceId?: string;
+    projectId?: string | null;
+  } | null;
+};
+
+type OAuthErrorResponse = {
+  error?: string;
+  error_description?: string;
+};
+
 const scopeHoldDirName = ".scopehold";
 const credentialsFileName = "credentials.json";
 const userConfigFileName = "config.json";
@@ -109,6 +149,8 @@ class CliError extends Error {
 }
 
 const commands: Record<string, CommandHandler> = {
+  connect: connectCommand,
+  disconnect: disconnectCommand,
   help: showHelp,
   status: statusCommand,
   inventory: inventoryCommand,
@@ -121,9 +163,11 @@ function usage(): string {
   return `Usage: scopehold <command> [options]
 
 Commands:
+  connect           Connect this machine with browser approval using a short code
+  disconnect        Revoke and remove a connected OAuth profile
   agent provision   Redeem a one-time provisioning prompt into a named local profile
   status            Show selected profile and project config without printing secrets
-  inventory         List secret metadata available to the selected Agent Key
+  inventory         List secret metadata available to the selected profile
   resolve           Resolve one secret by provider/name
   exec              Run a command with mapped secrets injected as environment variables
 
@@ -132,6 +176,9 @@ Global options:
   --api-url <url>   ScopeHold API URL override
   --json            Print JSON where supported
   --help            Show help
+
+Connect options:
+  --agent-name <n>  Suggested agent name shown on the approval screen
 
 Project config:
   scopehold exec reads the nearest ${projectConfigFileName}. Store only non-secret context there.
@@ -379,10 +426,286 @@ async function findProjectConfig(cwd: string): Promise<{ config: RuntimeConfig; 
 function profileFromStore(store: CredentialsStore, profileName: string): StoredProfile {
   const profile = store.profiles[profileName];
   if (!profile) {
-    throw new CliError(`ScopeHold profile "${profileName}" was not found. Run scopehold agent provision first.`);
+    throw new CliError(`ScopeHold profile "${profileName}" was not found. Run scopehold connect first.`);
   }
 
   return profile;
+}
+
+function storedProfileAuthType(profile: StoredProfile): "agent_key" | "oauth" {
+  if (profile.authType === "oauth" || profile.refreshToken || profile.accessToken) {
+    return "oauth";
+  }
+
+  return "agent_key";
+}
+
+function profileAccessToken(profile: StoredProfile): string | null {
+  const token = storedProfileAuthType(profile) === "oauth" ? profile.accessToken ?? profile.token : profile.token;
+  return typeof token === "string" && token.trim() ? token.trim() : null;
+}
+
+function profileRefreshToken(profile: StoredProfile): string | null {
+  return typeof profile.refreshToken === "string" && profile.refreshToken.trim() ? profile.refreshToken.trim() : null;
+}
+
+function accessTokenNeedsRefresh(profile: StoredProfile): boolean {
+  if (storedProfileAuthType(profile) !== "oauth") {
+    return false;
+  }
+
+  const expiresAt = profile.accessTokenExpiresAt ? Date.parse(profile.accessTokenExpiresAt) : Number.NaN;
+  if (!Number.isFinite(expiresAt)) {
+    return true;
+  }
+
+  return expiresAt <= Date.now() + 60_000;
+}
+
+function profileNameForConnection(input: {
+  explicitProfile?: string;
+  project?: { config: RuntimeConfig; configPath: string } | null;
+  store: CredentialsStore;
+}): string {
+  if (input.explicitProfile) {
+    return input.explicitProfile;
+  }
+
+  if (input.project?.config.profile) {
+    return input.project.config.profile;
+  }
+
+  const profileNames = Object.keys(input.store.profiles);
+  if (profileNames.length === 1) {
+    return profileNames[0]!;
+  }
+
+  return "default";
+}
+
+function apiUrlForProfile(input: {
+  context: CliContext;
+  profile?: StoredProfile;
+  project?: { config: RuntimeConfig; configPath: string } | null;
+}): string {
+  return normalizeApiUrl(
+    optionString(input.context.parsed.options, "api-url") ??
+      input.project?.config.apiUrl ??
+      input.profile?.apiUrl ??
+      input.context.env.SCOPEHOLD_API_URL ??
+      input.context.env.NEXT_PUBLIC_API_BASE_URL ??
+      defaultApiUrl
+  );
+}
+
+function requirePayloadString(payload: Record<string, unknown>, key: string): string {
+  const value = payload[key];
+  if (typeof value !== "string" || !value.trim()) {
+    throw new CliError(`ScopeHold OAuth response did not include ${key}.`);
+  }
+
+  return value.trim();
+}
+
+function optionalPayloadString(payload: Record<string, unknown>, key: string): string | undefined {
+  const value = payload[key];
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function requirePayloadNumber(payload: Record<string, unknown>, key: string): number {
+  const value = payload[key];
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new CliError(`ScopeHold OAuth response did not include ${key}.`);
+  }
+
+  return value;
+}
+
+async function fetchJsonResponse(input: {
+  body?: unknown;
+  headers?: Record<string, string>;
+  method?: string;
+  url: string;
+}): Promise<{ ok: boolean; status: number; payload: unknown }> {
+  const headers: Record<string, string> = {
+    ...(input.headers ?? {})
+  };
+
+  if (input.body !== undefined) {
+    headers["Content-Type"] = "application/json";
+  }
+
+  const response = await fetch(input.url, {
+    method: input.method ?? "GET",
+    headers,
+    body: input.body === undefined ? undefined : JSON.stringify(input.body)
+  });
+
+  let payload: unknown = null;
+  try {
+    payload = await response.json();
+  } catch {
+    payload = null;
+  }
+
+  return {
+    ok: response.ok,
+    status: response.status,
+    payload
+  };
+}
+
+function oauthErrorMessage(payload: unknown, fallback: string): string {
+  if (typeof payload !== "object" || payload === null) {
+    return fallback;
+  }
+
+  const error = payload as OAuthErrorResponse;
+  if (typeof error.error_description === "string" && error.error_description.trim()) {
+    return error.error_description.trim();
+  }
+
+  if (typeof error.error === "string" && error.error.trim()) {
+    return error.error.trim();
+  }
+
+  return fallback;
+}
+
+async function discoverOAuthServer(apiUrl: string): Promise<OAuthAuthorizationServerMetadata> {
+  const metadataUrl = `${normalizeApiUrl(apiUrl)}/.well-known/oauth-authorization-server`;
+  const response = await fetchJsonResponse({
+    url: metadataUrl
+  });
+
+  if (!response.ok || typeof response.payload !== "object" || response.payload === null) {
+    throw new CliError(`Could not read ScopeHold OAuth discovery from ${metadataUrl}.`);
+  }
+
+  const payload = response.payload as Record<string, unknown>;
+
+  return {
+    issuer: requirePayloadString(payload, "issuer"),
+    device_authorization_endpoint: requirePayloadString(payload, "device_authorization_endpoint"),
+    token_endpoint: requirePayloadString(payload, "token_endpoint"),
+    revocation_endpoint: requirePayloadString(payload, "revocation_endpoint")
+  };
+}
+
+function parseDeviceAuthorization(payload: unknown): DeviceAuthorizationResponse {
+  const record = assertRecord(payload, "device authorization response");
+
+  return {
+    device_code: requirePayloadString(record, "device_code"),
+    user_code: requirePayloadString(record, "user_code"),
+    verification_uri: requirePayloadString(record, "verification_uri"),
+    verification_uri_complete: optionalPayloadString(record, "verification_uri_complete"),
+    expires_in: requirePayloadNumber(record, "expires_in"),
+    interval: typeof record.interval === "number" && Number.isFinite(record.interval) ? record.interval : undefined
+  };
+}
+
+function parseOAuthTokenResponse(payload: unknown): OAuthTokenResponse {
+  const record = assertRecord(payload, "token response");
+  const agentValue = record.agent;
+  let agent: OAuthTokenResponse["agent"] = null;
+
+  if (typeof agentValue === "object" && agentValue !== null && !Array.isArray(agentValue)) {
+    const agentRecord = agentValue as Record<string, unknown>;
+    agent = {
+      id: requirePayloadString(agentRecord, "id"),
+      displayName: requirePayloadString(agentRecord, "displayName"),
+      workspaceId: optionalPayloadString(agentRecord, "workspaceId"),
+      projectId: optionalPayloadString(agentRecord, "projectId") ?? null
+    };
+  }
+
+  return {
+    access_token: requirePayloadString(record, "access_token"),
+    refresh_token: requirePayloadString(record, "refresh_token"),
+    token_type: requirePayloadString(record, "token_type"),
+    expires_in: requirePayloadNumber(record, "expires_in"),
+    agent
+  };
+}
+
+async function refreshOAuthProfile(input: {
+  apiUrl: string;
+  homeDir: string;
+  profile: StoredProfile;
+  profileName: string;
+  store: CredentialsStore;
+}): Promise<StoredProfile> {
+  const refreshToken = profileRefreshToken(input.profile);
+  if (!refreshToken) {
+    throw new CliError(`ScopeHold profile "${input.profileName}" has no refresh token. Run scopehold connect again.`);
+  }
+
+  const metadata = await discoverOAuthServer(input.apiUrl);
+  const response = await fetchJsonResponse({
+    url: metadata.token_endpoint,
+    method: "POST",
+    body: {
+      grant_type: "refresh_token",
+      refresh_token: refreshToken
+    }
+  });
+
+  if (!response.ok) {
+    throw new CliError(
+      oauthErrorMessage(response.payload, `ScopeHold profile "${input.profileName}" could not refresh. Run scopehold connect again.`)
+    );
+  }
+
+  const tokenResponse = parseOAuthTokenResponse(response.payload);
+  const now = new Date().toISOString();
+  const updated: StoredProfile = {
+    ...input.profile,
+    apiUrl: input.apiUrl,
+    authType: "oauth",
+    token: tokenResponse.access_token,
+    accessToken: tokenResponse.access_token,
+    refreshToken: tokenResponse.refresh_token,
+    tokenType: tokenResponse.token_type,
+    accessTokenExpiresAt: new Date(Date.now() + tokenResponse.expires_in * 1000).toISOString(),
+    updatedAt: now
+  };
+
+  input.store.profiles[input.profileName] = updated;
+  await writeCredentials(input.homeDir, input.store);
+  return updated;
+}
+
+async function tokenForProfile(input: {
+  apiUrl: string;
+  homeDir: string;
+  profile: StoredProfile;
+  profileName: string;
+  store: CredentialsStore;
+}): Promise<{ profile: StoredProfile; token: string }> {
+  if (storedProfileAuthType(input.profile) === "agent_key") {
+    const token = profileAccessToken(input.profile);
+    if (!token) {
+      throw new CliError(`ScopeHold profile "${input.profileName}" does not contain a token. Run scopehold connect again.`);
+    }
+
+    return {
+      profile: input.profile,
+      token
+    };
+  }
+
+  const refreshedProfile = accessTokenNeedsRefresh(input.profile) ? await refreshOAuthProfile(input) : input.profile;
+  const token = profileAccessToken(refreshedProfile);
+
+  if (!token) {
+    throw new CliError(`ScopeHold profile "${input.profileName}" does not contain an access token. Run scopehold connect again.`);
+  }
+
+  return {
+    profile: refreshedProfile,
+    token
+  };
 }
 
 async function resolveRuntimeContext(context: CliContext): Promise<RuntimeContext> {
@@ -401,11 +724,20 @@ async function resolveRuntimeContext(context: CliContext): Promise<RuntimeContex
   const selectedProfile = explicitProfile ?? configProfile;
   if (selectedProfile) {
     const profile = profileFromStore(store, selectedProfile);
+    const apiUrl = normalizeApiUrl(optionString(context.parsed.options, "api-url") ?? project?.config.apiUrl ?? profile.apiUrl);
+    const usable = await tokenForProfile({
+      apiUrl,
+      homeDir: context.homeDir,
+      profile,
+      profileName: selectedProfile,
+      store
+    });
+
     return {
       profileName: selectedProfile,
-      profile,
-      token: profile.token,
-      apiUrl: normalizeApiUrl(optionString(context.parsed.options, "api-url") ?? project?.config.apiUrl ?? profile.apiUrl),
+      profile: usable.profile,
+      token: usable.token,
+      apiUrl,
       config: project?.config,
       configPath: project?.configPath
     };
@@ -423,11 +755,20 @@ async function resolveRuntimeContext(context: CliContext): Promise<RuntimeContex
   if (profileNames.length === 1) {
     const profileName = profileNames[0]!;
     const profile = profileFromStore(store, profileName);
+    const apiUrl = normalizeApiUrl(optionString(context.parsed.options, "api-url") ?? project?.config.apiUrl ?? profile.apiUrl);
+    const usable = await tokenForProfile({
+      apiUrl,
+      homeDir: context.homeDir,
+      profile,
+      profileName,
+      store
+    });
+
     return {
       profileName,
-      profile,
-      token: profile.token,
-      apiUrl: normalizeApiUrl(optionString(context.parsed.options, "api-url") ?? project?.config.apiUrl ?? profile.apiUrl),
+      profile: usable.profile,
+      token: usable.token,
+      apiUrl,
       config: project?.config,
       configPath: project?.configPath
     };
@@ -439,7 +780,7 @@ async function resolveRuntimeContext(context: CliContext): Promise<RuntimeContex
     );
   }
 
-  throw new CliError("No ScopeHold profile or Agent Key found. Run scopehold agent provision first.");
+  throw new CliError("No ScopeHold profile or Agent Key found. Run scopehold connect first.");
 }
 
 function withConfigContext(input: {
@@ -477,6 +818,7 @@ async function statusCommand(context: CliContext): Promise<void> {
   const payload = {
     profile: runtime?.profileName ?? null,
     apiUrl: runtime?.apiUrl ?? null,
+    authType: runtime?.profile ? storedProfileAuthType(runtime.profile) : runtime ? "environment_token" : null,
     agent: runtime?.profile
       ? {
           id: runtime.profile.agentId ?? null,
@@ -510,6 +852,7 @@ async function statusCommand(context: CliContext): Promise<void> {
   if (payload.ready) {
     context.stdout.write("ScopeHold is configured.\n");
     context.stdout.write(`Profile: ${payload.profile ?? "environment token"}\n`);
+    context.stdout.write(`Auth: ${payload.authType ?? "unknown"}\n`);
     context.stdout.write(`API URL: ${payload.apiUrl}\n`);
     if (payload.agent?.displayName || payload.agent?.id) {
       context.stdout.write(`Agent: ${payload.agent.displayName ?? "unknown"} (${payload.agent.id ?? "unknown id"})\n`);
@@ -575,6 +918,296 @@ async function fetchJson(input: {
   }
 
   return response.json();
+}
+
+async function profileCanAuthenticate(input: {
+  apiUrl: string;
+  homeDir: string;
+  profile: StoredProfile;
+  profileName: string;
+  store: CredentialsStore;
+}): Promise<boolean> {
+  try {
+    const usable = await tokenForProfile(input);
+    await fetchJson({
+      apiUrl: input.apiUrl,
+      path: "/resolve/inventory",
+      token: usable.token
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function suggestedRepoSlug(project: { config: RuntimeConfig; configPath: string } | null, cwd: string): string {
+  if (project?.config.workspaceSlug && project.config.projectSlug) {
+    return `${project.config.workspaceSlug}/${project.config.projectSlug}`.slice(0, 200);
+  }
+
+  if (project?.config.projectSlug) {
+    return project.config.projectSlug.slice(0, 200);
+  }
+
+  if (project?.config.workspaceSlug) {
+    return `${project.config.workspaceSlug}/all-projects`.slice(0, 200);
+  }
+
+  return path.basename(cwd).slice(0, 200);
+}
+
+async function startDeviceAuthorization(input: {
+  agentName: string;
+  context: CliContext;
+  metadata: OAuthAuthorizationServerMetadata;
+  project: { config: RuntimeConfig; configPath: string } | null;
+}): Promise<DeviceAuthorizationResponse> {
+  const response = await fetchJsonResponse({
+    url: input.metadata.device_authorization_endpoint,
+    method: "POST",
+    body: {
+      agentName: input.agentName.slice(0, 80),
+      hostname: hostname().slice(0, 120),
+      runtimeType: "scopehold-cli",
+      repoSlug: suggestedRepoSlug(input.project, input.context.cwd)
+    }
+  });
+
+  if (!response.ok) {
+    throw new CliError(oauthErrorMessage(response.payload, "ScopeHold could not start device authorization."));
+  }
+
+  return parseDeviceAuthorization(response.payload);
+}
+
+async function pollDeviceToken(input: {
+  device: DeviceAuthorizationResponse;
+  metadata: OAuthAuthorizationServerMetadata;
+}): Promise<OAuthTokenResponse> {
+  let intervalSeconds = Math.max(0, input.device.interval ?? 5);
+  const expiresAt = Date.now() + input.device.expires_in * 1000;
+
+  while (Date.now() < expiresAt) {
+    await sleep(intervalSeconds * 1000);
+
+    const response = await fetchJsonResponse({
+      url: input.metadata.token_endpoint,
+      method: "POST",
+      body: {
+        grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+        device_code: input.device.device_code
+      }
+    });
+
+    if (response.ok) {
+      return parseOAuthTokenResponse(response.payload);
+    }
+
+    const error = typeof response.payload === "object" && response.payload !== null ? (response.payload as OAuthErrorResponse).error : null;
+
+    if (error === "authorization_pending") {
+      continue;
+    }
+
+    if (error === "slow_down") {
+      intervalSeconds += 5;
+      continue;
+    }
+
+    if (error === "access_denied") {
+      throw new CliError("ScopeHold authorization was denied.");
+    }
+
+    if (error === "expired_token") {
+      throw new CliError("ScopeHold authorization expired. Run scopehold connect again.");
+    }
+
+    throw new CliError(oauthErrorMessage(response.payload, "ScopeHold authorization failed."));
+  }
+
+  throw new CliError("ScopeHold authorization expired. Run scopehold connect again.");
+}
+
+async function connectCommand(context: CliContext): Promise<void> {
+  const project = await findProjectConfig(context.cwd);
+  const store = await readCredentials(context.homeDir);
+  const explicitProfile = optionString(context.parsed.options, "profile");
+  const profileName = profileNameForConnection({
+    explicitProfile,
+    project,
+    store
+  });
+  const existing = store.profiles[profileName];
+  const apiUrl = apiUrlForProfile({
+    context,
+    profile: existing,
+    project
+  });
+
+  if (existing) {
+    const works = await profileCanAuthenticate({
+      apiUrl,
+      homeDir: context.homeDir,
+      profile: existing,
+      profileName,
+      store
+    });
+
+    if (works) {
+      if (optionBoolean(context.parsed.options, "json")) {
+        context.stdout.write(
+          `${JSON.stringify(
+            {
+              profile: profileName,
+              apiUrl,
+              reused: true,
+              authType: storedProfileAuthType(store.profiles[profileName] ?? existing),
+              agent: {
+                id: store.profiles[profileName]?.agentId ?? existing.agentId ?? null,
+                displayName: store.profiles[profileName]?.agentName ?? existing.agentName ?? null
+              }
+            },
+            null,
+            2
+          )}\n`
+        );
+        return;
+      }
+
+      context.stdout.write(`ScopeHold profile "${profileName}" is already connected.\n`);
+      context.stdout.write("No new authorization flow was started.\n");
+      return;
+    }
+
+    const stream = optionBoolean(context.parsed.options, "json") ? context.stderr : context.stdout;
+    stream.write(`ScopeHold profile "${profileName}" could not authenticate. Starting a new connection.\n`);
+  }
+
+  const metadata = await discoverOAuthServer(apiUrl);
+  const agentName =
+    optionString(context.parsed.options, "agent-name") ??
+    existing?.agentName ??
+    `ScopeHold CLI on ${hostname() || "this machine"}`;
+  const device = await startDeviceAuthorization({
+    agentName,
+    context,
+    metadata,
+    project
+  });
+  const approvalUrl = device.verification_uri_complete ?? device.verification_uri;
+
+  const stream = optionBoolean(context.parsed.options, "json") ? context.stderr : context.stdout;
+  stream.write("Authorize this ScopeHold CLI profile in your browser.\n");
+  stream.write(`User code: ${device.user_code}\n`);
+  stream.write(`Open: ${approvalUrl}\n`);
+  if (device.verification_uri_complete) {
+    stream.write(`Or go to ${device.verification_uri} and enter the code above.\n`);
+  }
+  stream.write("Waiting for approval...\n");
+
+  const tokenResponse = await pollDeviceToken({
+    device,
+    metadata
+  });
+
+  await ensureUserConfig(context.homeDir);
+  const latestStore = await readCredentials(context.homeDir);
+  const now = new Date().toISOString();
+  const latestExisting = latestStore.profiles[profileName];
+  latestStore.profiles[profileName] = {
+    apiUrl,
+    authType: "oauth",
+    token: tokenResponse.access_token,
+    accessToken: tokenResponse.access_token,
+    refreshToken: tokenResponse.refresh_token,
+    tokenType: tokenResponse.token_type,
+    accessTokenExpiresAt: new Date(Date.now() + tokenResponse.expires_in * 1000).toISOString(),
+    agentId: tokenResponse.agent?.id,
+    agentName: tokenResponse.agent?.displayName,
+    createdAt: latestExisting?.createdAt ?? now,
+    updatedAt: now
+  };
+  await writeCredentials(context.homeDir, latestStore);
+
+  if (optionBoolean(context.parsed.options, "json")) {
+    context.stdout.write(
+      `${JSON.stringify(
+        {
+          profile: profileName,
+          apiUrl,
+          reused: false,
+          agent: tokenResponse.agent ?? null,
+          credentialsPath: credentialsPath(context.homeDir)
+        },
+        null,
+        2
+      )}\n`
+    );
+    return;
+  }
+
+  context.stdout.write(`Connected ScopeHold profile: ${profileName}\n`);
+  context.stdout.write(`Agent: ${tokenResponse.agent?.displayName ?? "unknown"} (${tokenResponse.agent?.id ?? "unknown id"})\n`);
+  context.stdout.write(`Credentials: ${credentialsPath(context.homeDir)}\n`);
+}
+
+async function disconnectCommand(context: CliContext): Promise<void> {
+  const project = await findProjectConfig(context.cwd);
+  const store = await readCredentials(context.homeDir);
+  const profileName = profileNameForConnection({
+    explicitProfile: optionString(context.parsed.options, "profile"),
+    project,
+    store
+  });
+  const profile = profileFromStore(store, profileName);
+
+  if (storedProfileAuthType(profile) !== "oauth") {
+    throw new CliError(
+      `ScopeHold profile "${profileName}" uses a legacy Agent Key. Revoke it in ScopeHold, or remove it from ${credentialsPath(context.homeDir)}.`
+    );
+  }
+
+  const token = profileRefreshToken(profile) ?? profileAccessToken(profile);
+  if (!token) {
+    throw new CliError(`ScopeHold profile "${profileName}" has no OAuth token to revoke.`);
+  }
+
+  const apiUrl = apiUrlForProfile({
+    context,
+    profile,
+    project
+  });
+  const metadata = await discoverOAuthServer(apiUrl);
+  const response = await fetchJsonResponse({
+    url: metadata.revocation_endpoint,
+    method: "POST",
+    body: {
+      token
+    }
+  });
+
+  if (!response.ok) {
+    throw new CliError(oauthErrorMessage(response.payload, `ScopeHold profile "${profileName}" could not be revoked.`));
+  }
+
+  delete store.profiles[profileName];
+  await writeCredentials(context.homeDir, store);
+
+  if (optionBoolean(context.parsed.options, "json")) {
+    context.stdout.write(
+      `${JSON.stringify(
+        {
+          profile: profileName,
+          disconnected: true
+        },
+        null,
+        2
+      )}\n`
+    );
+    return;
+  }
+
+  context.stdout.write(`Disconnected ScopeHold profile: ${profileName}\n`);
 }
 
 async function inventoryCommand(context: CliContext): Promise<void> {
@@ -752,6 +1385,7 @@ async function agentProvisionCommand(context: CliContext): Promise<void> {
   const existing = store.profiles[profileName];
   store.profiles[profileName] = {
     apiUrl,
+    authType: "agent_key",
     token: agentToken,
     agentId: payload.agent?.id,
     agentName: payload.agent?.displayName,
