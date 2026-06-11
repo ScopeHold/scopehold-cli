@@ -652,8 +652,9 @@ async function refreshOAuthProfile(input: {
   });
 
   if (!response.ok) {
+    const detail = oauthErrorMessage(response.payload, "The refresh token was rejected.");
     throw new CliError(
-      oauthErrorMessage(response.payload, `ScopeHold profile "${input.profileName}" could not refresh. Run scopehold connect again.`)
+      `ScopeHold profile "${input.profileName}" could not refresh: ${detail} Run scopehold connect --profile "${input.profileName}" to re-approve access.`
     );
   }
 
@@ -671,8 +672,10 @@ async function refreshOAuthProfile(input: {
     updatedAt: now
   };
 
+  const latestStore = await readCredentials(input.homeDir);
+  latestStore.profiles[input.profileName] = updated;
+  await writeCredentials(input.homeDir, latestStore);
   input.store.profiles[input.profileName] = updated;
-  await writeCredentials(input.homeDir, input.store);
   return updated;
 }
 
@@ -1177,28 +1180,43 @@ async function disconnectCommand(context: CliContext): Promise<void> {
     profile,
     project
   });
-  const metadata = await discoverOAuthServer(apiUrl);
-  const response = await fetchJsonResponse({
-    url: metadata.revocation_endpoint,
-    method: "POST",
-    body: {
-      token
-    }
-  });
+  let revocationWarning: string | null = null;
+  try {
+    const metadata = await discoverOAuthServer(apiUrl);
+    const response = await fetchJsonResponse({
+      url: metadata.revocation_endpoint,
+      method: "POST",
+      body: {
+        token
+      }
+    });
 
-  if (!response.ok) {
-    throw new CliError(oauthErrorMessage(response.payload, `ScopeHold profile "${profileName}" could not be revoked.`));
+    if (!response.ok) {
+      revocationWarning = oauthErrorMessage(response.payload, "The ScopeHold API rejected the revocation request.");
+    }
+  } catch (error) {
+    revocationWarning = error instanceof Error && error.message.trim() ? error.message : "Could not reach the ScopeHold API.";
   }
 
-  delete store.profiles[profileName];
-  await writeCredentials(context.homeDir, store);
+  const latestStore = await readCredentials(context.homeDir);
+  delete latestStore.profiles[profileName];
+  await writeCredentials(context.homeDir, latestStore);
+
+  if (revocationWarning) {
+    context.stderr.write(
+      redactSensitiveText(
+        `Warning: server-side revocation failed (${revocationWarning}). Local tokens for "${profileName}" were removed anyway; revoke the agent's access from the Connected Agents panel in ScopeHold.\n`
+      )
+    );
+  }
 
   if (optionBoolean(context.parsed.options, "json")) {
     context.stdout.write(
       `${JSON.stringify(
         {
           profile: profileName,
-          disconnected: true
+          disconnected: true,
+          revoked: revocationWarning === null
         },
         null,
         2

@@ -68,6 +68,8 @@ To revoke a connected OAuth profile and remove it from the local credential stor
 scopehold disconnect --profile scopehold-agent
 ```
 
+If server-side revocation fails (for example, the API is unreachable), the local tokens are still removed and the CLI prints a warning — revoke the agent's access from the Connected Agents panel in ScopeHold in that case. If a refresh ever fails, re-run `scopehold connect --profile <profile>`; the approval screen re-links your existing agent identity.
+
 ## Local Files
 
 The CLI stores profile credentials under the user's home directory, outside the repo:
