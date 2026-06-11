@@ -1,6 +1,6 @@
 const secretPatterns = [
   /\bBearer\s+[A-Za-z0-9._~+/=-]+/gi,
-  /\bag[pt]_[A-Za-z0-9._~-]{16,}\b/g,
+  /\bag(?:t|p|oa|or|dc|ac)_[A-Za-z0-9._~-]{16,}\b/g,
   /\bsk_(?:live|test)_[A-Za-z0-9._~-]{16,}\b/g
 ];
 
