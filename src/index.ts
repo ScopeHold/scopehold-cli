@@ -155,7 +155,8 @@ const commands: Record<string, CommandHandler> = {
   status: statusCommand,
   inventory: inventoryCommand,
   resolve: resolveCommand,
-  exec: execCommand,
+  run: runCommand,
+  exec: runCommand,
   agent: agentCommand
 };
 
@@ -169,7 +170,7 @@ Commands:
   status            Show selected profile and project config without printing secrets
   inventory         List secret metadata available to the selected profile
   resolve           Resolve one secret by provider/name
-  exec              Run a command with mapped secrets injected as environment variables
+  run               Run a command with mapped secrets injected as environment variables (alias: exec)
 
 Global options:
   --profile <name>  Local ScopeHold profile name
@@ -181,7 +182,7 @@ Connect options:
   --agent-name <n>  Suggested agent name shown on the approval screen
 
 Project config:
-  scopehold exec reads the nearest ${projectConfigFileName}. Store only non-secret context there.
+  scopehold run reads the nearest ${projectConfigFileName}. Store only non-secret context there.
 `;
 }
 
@@ -1328,14 +1329,14 @@ async function resolveCommand(context: CliContext): Promise<void> {
   context.stdout.write(`${serializeSecretValue(result)}\n`);
 }
 
-async function execCommand(context: CliContext): Promise<void> {
+async function runCommand(context: CliContext): Promise<void> {
   if (context.parsed.afterDoubleDash.length === 0) {
-    throw new CliError("exec requires a command after --.", 2);
+    throw new CliError("run requires a command after --.", 2);
   }
 
   const runtime = await resolveRuntimeContext(context);
   if (!runtime.configPath || !runtime.config) {
-    throw new CliError(`exec requires a ${projectConfigFileName} project config.`, 2);
+    throw new CliError(`run requires a ${projectConfigFileName} project config.`, 2);
   }
 
   const secrets = runtime.config.secrets ?? {};
