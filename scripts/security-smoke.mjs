@@ -216,6 +216,27 @@ async function main() {
     assert.equal(execResult.code, 0);
     assert.equal(execResult.stdout, `${fakeSecretValue}||`);
     assert.equal(execResult.stderr, "");
+
+    // D-023: `run` is the documented verb and must behave identically to `exec`.
+    const runResult = await runCli(
+      [
+        "run",
+        "--profile",
+        "test-profile",
+        "--",
+        process.execPath,
+        "-e",
+        "process.stdout.write([process.env.TEST_SECRET, process.env.SCOPEHOLD_TOKEN || '', process.env.SCOPEHOLD_AGENT_TOKEN || ''].join('|'))"
+      ],
+      {
+        homeDir,
+        cwd: projectDir
+      }
+    );
+
+    assert.equal(runResult.code, 0);
+    assert.equal(runResult.stdout, `${fakeSecretValue}||`);
+    assert.equal(runResult.stderr, "");
   } finally {
     await server.close();
     await rm(homeDir, {

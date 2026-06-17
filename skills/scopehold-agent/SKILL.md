@@ -13,7 +13,7 @@ Use ScopeHold to resolve only the secrets required for the current task. Never a
 - Store long-lived Agent Keys only through the official ScopeHold CLI profile flow or the runtime's secure secret store.
 - Store project context in `.scopehold.json` only when it contains no secrets.
 - Prefer `scopehold inventory` before resolving so you only request task-required secrets.
-- Prefer `scopehold exec` when `.scopehold.json` maps the required secrets and the target command can receive secrets through environment variables.
+- Prefer `scopehold run` when `.scopehold.json` maps the required secrets and the target command can receive secrets through environment variables (the `exec` alias still works).
 - Use `scopehold resolve` only when a secret value is required for the current task.
 - If access is denied or a secret is missing, ask the human to grant access in ScopeHold.
 
@@ -80,7 +80,7 @@ scopehold inventory
 Run a command with mapped secrets injected:
 
 ```sh
-scopehold exec -- npm test
+scopehold run -- npm test
 ```
 
 Resolve one specific secret:

@@ -33,7 +33,7 @@ scopehold agent provision --url "<provisioning-url>" --token "<one-time-token>" 
 scopehold status --profile "<profile>"
 scopehold inventory --profile "<profile>"
 scopehold resolve openai/api_key --profile "<profile>"
-scopehold exec -- npm test
+scopehold run -- npm test
 scopehold disconnect --profile "<profile>"
 ```
 
@@ -52,7 +52,7 @@ User code: ABCD-EFGH
 Open: https://scopehold.com/authorize-agent?code=ABCD-EFGH
 ```
 
-Open the URL, approve the agent in ScopeHold, choose its project access and token lifetime, then return to the terminal. The CLI stores the returned access and refresh tokens in the selected profile and silently refreshes access tokens when you run `status`, `inventory`, `resolve`, or `exec`.
+Open the URL, approve the agent in ScopeHold, choose its project access and token lifetime, then return to the terminal. The CLI stores the returned access and refresh tokens in the selected profile and silently refreshes access tokens when you run `status`, `inventory`, `resolve`, or `run`.
 
 If the selected profile can already authenticate, `scopehold connect` reuses it and exits without starting a new approval flow.
 
@@ -101,13 +101,15 @@ Project-local `.scopehold.json` files must contain only non-secret context and o
 
 Do not store Agent Keys, OAuth tokens, provider secret values, database URLs, or credential payloads in `.scopehold.json`.
 
-## Exec
+## Run
 
-`scopehold exec` resolves the mapped secrets in `.scopehold.json`, injects them into the child process environment, and does not write resolved values to disk:
+`scopehold run` resolves the mapped secrets in `.scopehold.json`, injects them into the child process environment, and does not write resolved values to disk:
 
 ```sh
-scopehold exec -- npm test
+scopehold run -- npm test
 ```
+
+`exec` is a permanent, behaviour-identical alias, so `scopehold exec -- npm test` keeps working unchanged.
 
 The API can mirror the underlying resolve calls, but it cannot launch a local process or inject environment variables by itself. API-only agents can reproduce the outcome by resolving each required secret through `/resolve` and setting environment variables in their own runtime.
 
