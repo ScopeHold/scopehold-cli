@@ -116,7 +116,7 @@ type DeviceAuthorizationResponse = {
 
 type OAuthTokenResponse = {
   access_token: string;
-  refresh_token: string;
+  refresh_token?: string;
   token_type: string;
   expires_in: number;
   agent?: {
@@ -573,6 +573,38 @@ function oauthErrorMessage(payload: unknown, fallback: string): string {
   return fallback;
 }
 
+function isInteractiveStream(stream: NodeJS.WriteStream): boolean {
+  return stream.isTTY === true;
+}
+
+async function openBrowser(url: string): Promise<boolean> {
+  const command =
+    process.platform === "darwin" ? "open" : process.platform === "win32" ? "cmd" : "xdg-open";
+  const args = process.platform === "win32" ? ["/c", "start", "", url] : [url];
+
+  return new Promise((resolve) => {
+    const child = spawn(command, args, {
+      detached: true,
+      stdio: "ignore"
+    });
+    let settled = false;
+    const settle = (opened: boolean) => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      resolve(opened);
+    };
+
+    child.once("error", () => settle(false));
+    child.once("spawn", () => {
+      child.unref();
+      settle(true);
+    });
+  });
+}
+
 async function discoverOAuthServer(apiUrl: string): Promise<OAuthAuthorizationServerMetadata> {
   const metadataUrl = `${normalizeApiUrl(apiUrl)}/.well-known/oauth-authorization-server`;
   const response = await fetchJsonResponse({
@@ -623,7 +655,7 @@ function parseOAuthTokenResponse(payload: unknown): OAuthTokenResponse {
 
   return {
     access_token: requirePayloadString(record, "access_token"),
-    refresh_token: requirePayloadString(record, "refresh_token"),
+    refresh_token: optionalPayloadString(record, "refresh_token"),
     token_type: requirePayloadString(record, "token_type"),
     expires_in: requirePayloadNumber(record, "expires_in"),
     agent
@@ -699,7 +731,16 @@ async function tokenForProfile(input: {
     };
   }
 
-  const refreshedProfile = accessTokenNeedsRefresh(input.profile) ? await refreshOAuthProfile(input) : input.profile;
+  let refreshedProfile = input.profile;
+  if (accessTokenNeedsRefresh(input.profile)) {
+    if (!profileRefreshToken(input.profile)) {
+      throw new CliError(
+        `ScopeHold profile "${input.profileName}" has expired. It was connected with the session lifetime, which has no refresh token, so it cannot renew automatically. Run scopehold connect --profile "${input.profileName}" to reconnect.`
+      );
+    }
+
+    refreshedProfile = await refreshOAuthProfile(input);
+  }
   const token = profileAccessToken(refreshedProfile);
 
   if (!token) {
@@ -1103,6 +1144,9 @@ async function connectCommand(context: CliContext): Promise<void> {
   const stream = optionBoolean(context.parsed.options, "json") ? context.stderr : context.stdout;
   stream.write("Authorize this ScopeHold CLI profile in your browser.\n");
   stream.write(`User code: ${device.user_code}\n`);
+  if (isInteractiveStream(stream) && (await openBrowser(approvalUrl))) {
+    stream.write("Opening browser for approval.\n");
+  }
   stream.write(`Open: ${approvalUrl}\n`);
   if (device.verification_uri_complete) {
     stream.write(`Or go to ${device.verification_uri} and enter the code above.\n`);
