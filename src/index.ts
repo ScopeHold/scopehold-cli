@@ -573,6 +573,38 @@ function oauthErrorMessage(payload: unknown, fallback: string): string {
   return fallback;
 }
 
+function isInteractiveStream(stream: NodeJS.WriteStream): boolean {
+  return stream.isTTY === true;
+}
+
+async function openBrowser(url: string): Promise<boolean> {
+  const command =
+    process.platform === "darwin" ? "open" : process.platform === "win32" ? "cmd" : "xdg-open";
+  const args = process.platform === "win32" ? ["/c", "start", "", url] : [url];
+
+  return new Promise((resolve) => {
+    const child = spawn(command, args, {
+      detached: true,
+      stdio: "ignore"
+    });
+    let settled = false;
+    const settle = (opened: boolean) => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      resolve(opened);
+    };
+
+    child.once("error", () => settle(false));
+    child.once("spawn", () => {
+      child.unref();
+      settle(true);
+    });
+  });
+}
+
 async function discoverOAuthServer(apiUrl: string): Promise<OAuthAuthorizationServerMetadata> {
   const metadataUrl = `${normalizeApiUrl(apiUrl)}/.well-known/oauth-authorization-server`;
   const response = await fetchJsonResponse({
@@ -1112,6 +1144,9 @@ async function connectCommand(context: CliContext): Promise<void> {
   const stream = optionBoolean(context.parsed.options, "json") ? context.stderr : context.stdout;
   stream.write("Authorize this ScopeHold CLI profile in your browser.\n");
   stream.write(`User code: ${device.user_code}\n`);
+  if (isInteractiveStream(stream) && (await openBrowser(approvalUrl))) {
+    stream.write("Opening browser for approval.\n");
+  }
   stream.write(`Open: ${approvalUrl}\n`);
   if (device.verification_uri_complete) {
     stream.write(`Or go to ${device.verification_uri} and enter the code above.\n`);

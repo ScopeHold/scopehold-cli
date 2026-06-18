@@ -45,14 +45,16 @@ scopehold disconnect --profile "<profile>"
 scopehold connect --profile scopehold-agent
 ```
 
-The command prints a short user code and an approval URL:
+In an interactive terminal, the command opens the approval URL in your browser.
+It also prints a short user code and URL as a fallback:
 
 ```text
 User code: ABCD-EFGH
+Opening browser for approval.
 Open: https://scopehold.com/authorize-agent?code=ABCD-EFGH
 ```
 
-Open the URL, approve the agent in ScopeHold, choose its project access and token lifetime, then return to the terminal. The CLI stores the returned access and refresh tokens in the selected profile and silently refreshes access tokens when you run `status`, `inventory`, `resolve`, or `run`.
+Approve the agent in ScopeHold, choose its project access and token lifetime, then return to the terminal. The CLI stores the returned OAuth credentials in the selected profile and silently refreshes access tokens when the chosen lifetime includes a refresh token.
 
 If the selected profile can already authenticate, `scopehold connect` reuses it and exits without starting a new approval flow.
 
