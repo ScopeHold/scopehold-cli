@@ -23,6 +23,7 @@ Check the install:
 
 ```sh
 scopehold --help
+scopehold --version
 ```
 
 ## Commands
@@ -34,7 +35,19 @@ scopehold status --profile "<profile>"
 scopehold inventory --profile "<profile>"
 scopehold resolve openai/api_key --profile "<profile>"
 scopehold run -- npm test
+scopehold version
+scopehold update
 scopehold disconnect --profile "<profile>"
+```
+
+`scopehold update` checks npm and prints the recommended update command when a newer CLI is available:
+
+```text
+Current: 0.3.1
+Latest:  0.3.2
+
+Update available:
+npm install -g @scopehold/cli@latest
 ```
 
 ## Connect

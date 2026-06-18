@@ -1,6 +1,6 @@
 {
   "name": "@scopehold/cli",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Official ScopeHold CLI and agent skill for connecting agent profiles and resolving ScopeHold-managed secrets.",
   "license": "MIT",
   "publishConfig": {
@@ -29,6 +29,7 @@
     "postbuild": "node -e \"require('node:fs').chmodSync('dist/index.js', 0o755)\"",
     "prepare": "npm run build",
     "prepublishOnly": "npm run typecheck",
+    "test:cli": "npm run build && node scripts/cli-smoke.mjs",
     "test:oauth": "npm run build && node scripts/oauth-smoke.mjs",
     "test:security": "npm run build && node scripts/security-smoke.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit"

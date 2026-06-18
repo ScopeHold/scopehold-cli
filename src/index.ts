@@ -132,11 +132,17 @@ type OAuthErrorResponse = {
   error_description?: string;
 };
 
+type PackageManifestResponse = {
+  version?: unknown;
+};
+
 const scopeHoldDirName = ".scopehold";
 const credentialsFileName = "credentials.json";
 const userConfigFileName = "config.json";
 const projectConfigFileName = ".scopehold.json";
 const defaultApiUrl = "https://api.scopehold.com";
+const packageName = "@scopehold/cli";
+const npmRegistryUrl = "https://registry.npmjs.org";
 
 class CliError extends Error {
   code: number;
@@ -152,6 +158,8 @@ const commands: Record<string, CommandHandler> = {
   connect: connectCommand,
   disconnect: disconnectCommand,
   help: showHelp,
+  version: versionCommand,
+  update: updateCommand,
   status: statusCommand,
   inventory: inventoryCommand,
   resolve: resolveCommand,
@@ -166,6 +174,8 @@ function usage(): string {
 Commands:
   connect           Connect this machine with browser approval using a short code
   disconnect        Revoke and remove a connected OAuth profile
+  version           Show the installed ScopeHold CLI version
+  update            Check whether a newer ScopeHold CLI is available
   agent provision   Redeem a one-time provisioning prompt into a named local profile
   status            Show selected profile and project config without printing secrets
   inventory         List secret metadata available to the selected profile
@@ -177,6 +187,7 @@ Global options:
   --api-url <url>   ScopeHold API URL override
   --json            Print JSON where supported
   --help            Show help
+  --version         Show version
 
 Connect options:
   --agent-name <n>  Suggested agent name shown on the approval screen
@@ -196,6 +207,11 @@ function parseArgs(argv: string[]): ParsedArgs {
   for (let index = 0; index < beforeDoubleDash.length; index += 1) {
     const raw = beforeDoubleDash[index]!;
 
+    if (raw === "-v") {
+      options.version = true;
+      continue;
+    }
+
     if (!raw.startsWith("--")) {
       args.push(raw);
       continue;
@@ -206,7 +222,7 @@ function parseArgs(argv: string[]): ParsedArgs {
       throw new CliError("Invalid option.", 2);
     }
 
-    if (name === "help" || name === "json" || name === "metadata") {
+    if (name === "help" || name === "json" || name === "metadata" || name === "version") {
       options[name] = true;
       continue;
     }
@@ -849,6 +865,105 @@ async function showHelp(context: CliContext): Promise<void> {
   context.stdout.write(usage());
 }
 
+async function readPackageVersion(): Promise<string> {
+  const packageUrl = new URL("../package.json", import.meta.url);
+  const payload = JSON.parse(await readFile(packageUrl, "utf8")) as { version?: unknown };
+  if (typeof payload.version !== "string" || !payload.version.trim()) {
+    throw new CliError("ScopeHold CLI package version could not be read.");
+  }
+
+  return payload.version.trim();
+}
+
+function compareVersions(left: string, right: string): number {
+  const leftParts = left.split("-", 1)[0]!.split(".").map((part) => Number.parseInt(part, 10));
+  const rightParts = right.split("-", 1)[0]!.split(".").map((part) => Number.parseInt(part, 10));
+  const length = Math.max(leftParts.length, rightParts.length);
+
+  for (let index = 0; index < length; index += 1) {
+    const leftValue = Number.isFinite(leftParts[index]) ? leftParts[index]! : 0;
+    const rightValue = Number.isFinite(rightParts[index]) ? rightParts[index]! : 0;
+
+    if (leftValue > rightValue) {
+      return 1;
+    }
+
+    if (leftValue < rightValue) {
+      return -1;
+    }
+  }
+
+  return 0;
+}
+
+function npmLatestManifestUrl(registryUrl: string): string {
+  return `${registryUrl.trim().replace(/\/+$/, "")}/${encodeURIComponent(packageName).replace("%40", "@")}/latest`;
+}
+
+async function fetchLatestPackageVersion(registryUrl: string): Promise<string> {
+  const response = await fetchJsonResponse({
+    url: npmLatestManifestUrl(registryUrl)
+  });
+
+  if (!response.ok || typeof response.payload !== "object" || response.payload === null) {
+    throw new CliError(`Could not check ${packageName} on npm.`);
+  }
+
+  const payload = response.payload as PackageManifestResponse;
+  if (typeof payload.version !== "string" || !payload.version.trim()) {
+    throw new CliError(`npm did not return a latest version for ${packageName}.`);
+  }
+
+  return payload.version.trim();
+}
+
+async function versionCommand(context: CliContext): Promise<void> {
+  const version = await readPackageVersion();
+
+  if (optionBoolean(context.parsed.options, "json")) {
+    context.stdout.write(`${JSON.stringify({ version }, null, 2)}\n`);
+    return;
+  }
+
+  context.stdout.write(`${version}\n`);
+}
+
+async function updateCommand(context: CliContext): Promise<void> {
+  const currentVersion = await readPackageVersion();
+  const registryUrl = optionString(context.parsed.options, "registry-url") ?? npmRegistryUrl;
+  const latestVersion = await fetchLatestPackageVersion(registryUrl);
+  const installCommand = `npm install -g ${packageName}@latest`;
+  const updateAvailable = compareVersions(latestVersion, currentVersion) > 0;
+
+  if (optionBoolean(context.parsed.options, "json")) {
+    context.stdout.write(
+      `${JSON.stringify(
+        {
+          current: currentVersion,
+          latest: latestVersion,
+          updateAvailable,
+          installCommand: updateAvailable ? installCommand : null
+        },
+        null,
+        2
+      )}\n`
+    );
+    return;
+  }
+
+  context.stdout.write(`Current: ${currentVersion}\n`);
+  context.stdout.write(`Latest:  ${latestVersion}\n`);
+  context.stdout.write("\n");
+
+  if (updateAvailable) {
+    context.stdout.write("Update available:\n");
+    context.stdout.write(`${installCommand}\n`);
+    return;
+  }
+
+  context.stdout.write(`ScopeHold CLI is up to date: ${currentVersion}\n`);
+}
+
 async function statusCommand(context: CliContext): Promise<void> {
   let runtime: RuntimeContext | null = null;
   let runtimeError: Error | null = null;
@@ -1488,6 +1603,11 @@ async function main(): Promise<void> {
     stdout: process.stdout,
     stderr: process.stderr
   };
+
+  if (optionBoolean(parsed.options, "version")) {
+    await versionCommand(context);
+    return;
+  }
 
   if (!parsed.command || optionBoolean(parsed.options, "help")) {
     await showHelp(context);
