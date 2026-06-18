@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { constants as fsConstants } from "node:fs";
-import { access, mkdtemp, readFile, rm } from "node:fs/promises";
+import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -56,7 +56,9 @@ async function readBody(request) {
   return raw ? JSON.parse(raw) : {};
 }
 
-async function listen() {
+async function listen(options = {}) {
+  const issueRefreshToken = options.issueRefreshToken !== false;
+  const accessTokenTtlSeconds = options.accessTokenTtlSeconds ?? 1;
   const state = {
     authorizeCount: 0,
     devicePollCount: 0,
@@ -127,20 +129,21 @@ async function listen() {
         response.writeHead(200, {
           "Content-Type": "application/json"
         });
-        response.end(
-          JSON.stringify({
-            access_token: accessToken1,
-            refresh_token: refreshToken1,
-            token_type: "Bearer",
-            expires_in: 1,
-            agent: {
-              id: "agent_oauth_test",
-              displayName: "OAuth Test Agent",
-              workspaceId: "workspace_test",
-              projectId: "project_test"
-            }
-          })
-        );
+        const deviceTokenResponse = {
+          access_token: accessToken1,
+          token_type: "Bearer",
+          expires_in: accessTokenTtlSeconds,
+          agent: {
+            id: "agent_oauth_test",
+            displayName: "OAuth Test Agent",
+            workspaceId: "workspace_test",
+            projectId: "project_test"
+          }
+        };
+        if (issueRefreshToken) {
+          deviceTokenResponse.refresh_token = refreshToken1;
+        }
+        response.end(JSON.stringify(deviceTokenResponse));
         return;
       }
 
@@ -303,4 +306,54 @@ async function main() {
   }
 }
 
+async function runSessionScenario() {
+  await access(cliPath, fsConstants.X_OK);
+  const homeDir = await mkdtemp(path.join(tmpdir(), "scopehold-cli-session-"));
+  const server = await listen({ issueRefreshToken: false, accessTokenTtlSeconds: 3600 });
+
+  try {
+    const connect = await runCli(
+      ["connect", "--profile", "session-profile", "--api-url", server.apiUrl, "--agent-name", "Session Test Agent"],
+      { homeDir }
+    );
+
+    assert.equal(connect.code, 0);
+    assert.equal(connect.stderr, "");
+    assert.match(connect.stdout, /Connected ScopeHold profile: session-profile/);
+    assert.equal(connect.stdout.includes(accessToken1), false);
+
+    const credentialsPath = path.join(homeDir, ".scopehold", "credentials.json");
+    const credentials = JSON.parse(await readFile(credentialsPath, "utf8"));
+    const profile = credentials.profiles["session-profile"];
+    assert.equal(profile.authType, "oauth");
+    assert.equal(profile.accessToken, accessToken1);
+    assert.equal(profile.refreshToken, undefined);
+
+    const inventory = await runCli(
+      ["inventory", "--profile", "session-profile", "--api-url", server.apiUrl, "--json"],
+      { homeDir }
+    );
+    assert.equal(inventory.code, 0);
+    assert.equal(inventory.stderr, "");
+    assert.ok(server.state.inventoryTokens.includes(accessToken1));
+
+    credentials.profiles["session-profile"].accessTokenExpiresAt = new Date(Date.now() - 1000).toISOString();
+    await writeFile(credentialsPath, `${JSON.stringify(credentials, null, 2)}\n`);
+
+    const expired = await runCli(
+      ["inventory", "--profile", "session-profile", "--api-url", server.apiUrl, "--json"],
+      { homeDir }
+    );
+    assert.notEqual(expired.code, 0);
+    assert.match(expired.stderr, /session lifetime/);
+    assert.match(expired.stderr, /scopehold connect --profile "session-profile"/);
+    assert.equal(expired.stderr.includes("was not found"), false);
+    assert.equal(server.state.refreshCount, 0);
+  } finally {
+    await server.close();
+    await rm(homeDir, { recursive: true, force: true });
+  }
+}
+
 await main();
+await runSessionScenario();

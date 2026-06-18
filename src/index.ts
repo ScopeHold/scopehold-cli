@@ -116,7 +116,7 @@ type DeviceAuthorizationResponse = {
 
 type OAuthTokenResponse = {
   access_token: string;
-  refresh_token: string;
+  refresh_token?: string;
   token_type: string;
   expires_in: number;
   agent?: {
@@ -623,7 +623,7 @@ function parseOAuthTokenResponse(payload: unknown): OAuthTokenResponse {
 
   return {
     access_token: requirePayloadString(record, "access_token"),
-    refresh_token: requirePayloadString(record, "refresh_token"),
+    refresh_token: optionalPayloadString(record, "refresh_token"),
     token_type: requirePayloadString(record, "token_type"),
     expires_in: requirePayloadNumber(record, "expires_in"),
     agent
@@ -699,7 +699,16 @@ async function tokenForProfile(input: {
     };
   }
 
-  const refreshedProfile = accessTokenNeedsRefresh(input.profile) ? await refreshOAuthProfile(input) : input.profile;
+  let refreshedProfile = input.profile;
+  if (accessTokenNeedsRefresh(input.profile)) {
+    if (!profileRefreshToken(input.profile)) {
+      throw new CliError(
+        `ScopeHold profile "${input.profileName}" has expired. It was connected with the session lifetime, which has no refresh token, so it cannot renew automatically. Run scopehold connect --profile "${input.profileName}" to reconnect.`
+      );
+    }
+
+    refreshedProfile = await refreshOAuthProfile(input);
+  }
   const token = profileAccessToken(refreshedProfile);
 
   if (!token) {
