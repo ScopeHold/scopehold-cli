@@ -13,10 +13,12 @@ import { createChildEnvWithMappedSecrets, redactSensitiveText } from "./security
 
 type CommandHandler = (context: CliContext) => Promise<void>;
 
+type OptionValue = string | boolean | string[];
+
 type ParsedArgs = {
   command: string | null;
   args: string[];
-  options: Record<string, string | boolean>;
+  options: Record<string, OptionValue>;
   afterDoubleDash: string[];
 };
 
@@ -62,6 +64,12 @@ type SecretMapping = {
   provider: string;
   name: string;
   environment?: string;
+};
+
+type InlineSecretField = "value" | "username" | "password" | "loginUrl" | "referenceId";
+
+type InlineSecretMapping = SecretMapping & {
+  field: InlineSecretField;
 };
 
 type RuntimeContext = {
@@ -143,6 +151,10 @@ const projectConfigFileName = ".scopehold.json";
 const defaultApiUrl = "https://api.scopehold.com";
 const packageName = "@scopehold/cli";
 const npmRegistryUrl = "https://registry.npmjs.org";
+const booleanOptionNames = new Set(["help", "json", "metadata", "version", "check"]);
+const repeatableOptionNames = new Set(["secret"]);
+const envNamePattern = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const inlineSecretFields = new Set<InlineSecretField>(["value", "username", "password", "loginUrl", "referenceId"]);
 
 class CliError extends Error {
   code: number;
@@ -175,7 +187,7 @@ Commands:
   connect           Connect this machine with browser approval using a short code
   disconnect        Revoke and remove a connected OAuth profile
   version           Show the installed ScopeHold CLI version
-  update            Check whether a newer ScopeHold CLI is available
+  update            Upgrade the ScopeHold CLI, or check with --check
   agent provision   Redeem a one-time provisioning prompt into a named local profile
   status            Show selected profile and project config without printing secrets
   inventory         List secret metadata available to the selected profile
@@ -189,26 +201,68 @@ Global options:
   --help            Show help
   --version         Show version
 
+Update options:
+  --check           Check for updates without installing
+
 Connect options:
   --agent-name <n>  Suggested agent name shown on the approval screen
 
+Run options:
+  --secret NAME=provider/name[:field]
+                    Inject an inline secret into the child environment
+                    field defaults to value; supported fields: value, username, password, loginUrl, referenceId
+
 Project config:
   scopehold run reads the nearest ${projectConfigFileName}. Store only non-secret context there.
+
+Examples:
+  scopehold run --secret DATABASE_URL=supabase/database_url -- npx prisma migrate deploy
+  scopehold run --secret TOKEN=provider/name -- sh -c 'curl https://example.com -H "Authorization: Bearer $TOKEN"'
 `;
+}
+
+function setOption(options: Record<string, OptionValue>, name: string, value: string | boolean): void {
+  if (!repeatableOptionNames.has(name)) {
+    options[name] = value;
+    return;
+  }
+
+  if (typeof value !== "string") {
+    options[name] = value;
+    return;
+  }
+
+  const existing = options[name];
+  if (existing === undefined) {
+    options[name] = [value];
+    return;
+  }
+
+  if (Array.isArray(existing)) {
+    existing.push(value);
+    return;
+  }
+
+  if (typeof existing === "string") {
+    options[name] = [existing, value];
+    return;
+  }
+
+  throw new CliError(`--${name} cannot be repeated as a boolean option.`, 2);
 }
 
 function parseArgs(argv: string[]): ParsedArgs {
   const doubleDashIndex = argv.indexOf("--");
   const beforeDoubleDash = doubleDashIndex === -1 ? argv : argv.slice(0, doubleDashIndex);
   const afterDoubleDash = doubleDashIndex === -1 ? [] : argv.slice(doubleDashIndex + 1);
-  const options: Record<string, string | boolean> = {};
+  const options: Record<string, OptionValue> = {};
   const args: string[] = [];
 
   for (let index = 0; index < beforeDoubleDash.length; index += 1) {
     const raw = beforeDoubleDash[index]!;
 
     if (raw === "-v") {
-      options.version = true;
+      setOption(options, "version", true);
       continue;
     }
 
@@ -217,22 +271,28 @@ function parseArgs(argv: string[]): ParsedArgs {
       continue;
     }
 
-    const [name, inlineValue] = raw.slice(2).split("=", 2);
+    const optionBody = raw.slice(2);
+    const equalsIndex = optionBody.indexOf("=");
+    const name = equalsIndex === -1 ? optionBody : optionBody.slice(0, equalsIndex);
+    const inlineValue = equalsIndex === -1 ? undefined : optionBody.slice(equalsIndex + 1);
     if (!name) {
       throw new CliError("Invalid option.", 2);
     }
 
-    if (name === "help" || name === "json" || name === "metadata" || name === "version") {
-      options[name] = true;
+    if (booleanOptionNames.has(name)) {
+      if (inlineValue !== undefined) {
+        throw new CliError(`--${name} does not take a value.`, 2);
+      }
+      setOption(options, name, true);
       continue;
     }
 
     const value = inlineValue ?? beforeDoubleDash[index + 1];
-    if (!value || value.startsWith("--")) {
+    if (!value || (inlineValue === undefined && value.startsWith("--"))) {
       throw new CliError(`Missing value for --${name}.`, 2);
     }
 
-    options[name] = value;
+    setOption(options, name, value);
     if (inlineValue === undefined) {
       index += 1;
     }
@@ -247,16 +307,25 @@ function parseArgs(argv: string[]): ParsedArgs {
   };
 }
 
-function optionString(options: Record<string, string | boolean>, name: string): string | undefined {
+function optionString(options: Record<string, OptionValue>, name: string): string | undefined {
   const value = options[name];
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
-function optionBoolean(options: Record<string, string | boolean>, name: string): boolean {
+function optionStrings(options: Record<string, OptionValue>, name: string): string[] {
+  const value = options[name];
+  if (Array.isArray(value)) {
+    return value.map((entry) => entry.trim()).filter(Boolean);
+  }
+
+  return typeof value === "string" && value.trim() ? [value.trim()] : [];
+}
+
+function optionBoolean(options: Record<string, OptionValue>, name: string): boolean {
   return options[name] === true;
 }
 
-function requireOption(options: Record<string, string | boolean>, name: string): string {
+function requireOption(options: Record<string, OptionValue>, name: string): string {
   const value = optionString(options, name);
   if (!value) {
     throw new CliError(`--${name} is required.`, 2);
@@ -846,7 +915,7 @@ async function resolveRuntimeContext(context: CliContext): Promise<RuntimeContex
 
 function withConfigContext(input: {
   config?: RuntimeConfig;
-  options: Record<string, string | boolean>;
+  options: Record<string, OptionValue>;
 }): {
   workspaceId?: string;
   workspaceSlug?: string;
@@ -900,6 +969,24 @@ function npmLatestManifestUrl(registryUrl: string): string {
   return `${registryUrl.trim().replace(/\/+$/, "")}/${encodeURIComponent(packageName).replace("%40", "@")}/latest`;
 }
 
+function normalizedRegistryUrl(registryUrl: string): string {
+  return registryUrl.trim().replace(/\/+$/, "");
+}
+
+function npmInstallArgs(registryUrl: string): string[] {
+  const args = ["install", "-g", `${packageName}@latest`];
+  const normalizedRegistry = normalizedRegistryUrl(registryUrl);
+  if (normalizedRegistry !== npmRegistryUrl) {
+    args.push("--registry", normalizedRegistry);
+  }
+
+  return args;
+}
+
+function npmInstallCommand(registryUrl: string): string {
+  return ["npm", ...npmInstallArgs(registryUrl)].join(" ");
+}
+
 async function fetchLatestPackageVersion(registryUrl: string): Promise<string> {
   const response = await fetchJsonResponse({
     url: npmLatestManifestUrl(registryUrl)
@@ -917,6 +1004,35 @@ async function fetchLatestPackageVersion(registryUrl: string): Promise<string> {
   return payload.version.trim();
 }
 
+async function runNpmUpdate(registryUrl: string): Promise<void> {
+  const args = npmInstallArgs(registryUrl);
+
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn("npm", args, {
+      cwd: process.cwd(),
+      env: process.env,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+
+    let stderr = "";
+    child.stderr?.setEncoding("utf8");
+    child.stderr?.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    child.once("error", (error) => {
+      reject(error);
+    });
+    child.once("close", (code) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+
+      reject(new Error(stderr.trim() || `npm exited with code ${code ?? 1}.`));
+    });
+  });
+}
+
 async function versionCommand(context: CliContext): Promise<void> {
   const version = await readPackageVersion();
 
@@ -932,8 +1048,50 @@ async function updateCommand(context: CliContext): Promise<void> {
   const currentVersion = await readPackageVersion();
   const registryUrl = optionString(context.parsed.options, "registry-url") ?? npmRegistryUrl;
   const latestVersion = await fetchLatestPackageVersion(registryUrl);
-  const installCommand = `npm install -g ${packageName}@latest`;
+  const installCommand = npmInstallCommand(registryUrl);
   const updateAvailable = compareVersions(latestVersion, currentVersion) > 0;
+  const checkOnly = optionBoolean(context.parsed.options, "check");
+
+  if (checkOnly || !updateAvailable) {
+    if (optionBoolean(context.parsed.options, "json")) {
+      context.stdout.write(
+        `${JSON.stringify(
+          {
+            current: currentVersion,
+            latest: latestVersion,
+            updateAvailable,
+            installCommand: updateAvailable ? installCommand : null,
+            updated: false
+          },
+          null,
+          2
+        )}\n`
+      );
+      return;
+    }
+
+    context.stdout.write(`Current: ${currentVersion}\n`);
+    context.stdout.write(`Latest:  ${latestVersion}\n`);
+    context.stdout.write("\n");
+
+    if (updateAvailable) {
+      context.stdout.write("Update available:\n");
+      context.stdout.write(`${installCommand}\n`);
+      return;
+    }
+
+    context.stdout.write(`ScopeHold CLI is up to date: ${currentVersion}\n`);
+    return;
+  }
+
+  let updated = false;
+  let updateError: string | null = null;
+  try {
+    await runNpmUpdate(registryUrl);
+    updated = true;
+  } catch (error) {
+    updateError = error instanceof Error && error.message.trim() ? error.message.trim() : "npm update failed.";
+  }
 
   if (optionBoolean(context.parsed.options, "json")) {
     context.stdout.write(
@@ -942,12 +1100,19 @@ async function updateCommand(context: CliContext): Promise<void> {
           current: currentVersion,
           latest: latestVersion,
           updateAvailable,
-          installCommand: updateAvailable ? installCommand : null
+          installCommand,
+          updated,
+          updatedVersion: updated ? latestVersion : null,
+          manualCommand: updated ? null : installCommand,
+          error: updateError
         },
         null,
         2
       )}\n`
     );
+    if (!updated) {
+      process.exit(1);
+    }
     return;
   }
 
@@ -955,13 +1120,15 @@ async function updateCommand(context: CliContext): Promise<void> {
   context.stdout.write(`Latest:  ${latestVersion}\n`);
   context.stdout.write("\n");
 
-  if (updateAvailable) {
-    context.stdout.write("Update available:\n");
-    context.stdout.write(`${installCommand}\n`);
+  if (updated) {
+    context.stdout.write(`Updated ScopeHold CLI to ${latestVersion}.\n`);
+    context.stdout.write("Run scopehold --version to verify your shell is using the updated binary.\n");
     return;
   }
 
-  context.stdout.write(`ScopeHold CLI is up to date: ${currentVersion}\n`);
+  context.stderr.write(redactSensitiveText(`ScopeHold CLI could not self-update: ${updateError ?? "unknown error"}\n`));
+  context.stderr.write(`Run manually:\n${installCommand}\n`);
+  process.exit(1);
 }
 
 async function statusCommand(context: CliContext): Promise<void> {
@@ -1435,6 +1602,84 @@ function serializeSecretValue(result: ResolveSecretResult): string {
   return result.value;
 }
 
+function parseInlineSecretMapping(value: string): { envName: string; mapping: InlineSecretMapping } {
+  const equalsIndex = value.indexOf("=");
+  if (equalsIndex <= 0 || equalsIndex === value.length - 1) {
+    throw new CliError("--secret must be NAME=provider/name[:field].", 2);
+  }
+
+  const envName = value.slice(0, equalsIndex).trim();
+  const locator = value.slice(equalsIndex + 1).trim();
+  if (!envNamePattern.test(envName)) {
+    throw new CliError(`--secret environment name "${envName}" is invalid. Use a shell-safe env var name.`, 2);
+  }
+
+  const fieldSeparatorIndex = locator.lastIndexOf(":");
+  let ref = locator;
+  let field: InlineSecretField = "value";
+
+  if (fieldSeparatorIndex !== -1) {
+    const maybeField = locator.slice(fieldSeparatorIndex + 1).trim();
+    if (!inlineSecretFields.has(maybeField as InlineSecretField)) {
+      throw new CliError(
+        `Unsupported --secret field "${maybeField}". Use value, username, password, loginUrl, or referenceId.`,
+        2
+      );
+    }
+
+    ref = locator.slice(0, fieldSeparatorIndex);
+    field = maybeField as InlineSecretField;
+  }
+
+  const parsedRef = parseSecretRef(ref);
+  return {
+    envName,
+    mapping: {
+      ...parsedRef,
+      field
+    }
+  };
+}
+
+function serializeInlineSecretValue(result: ResolveSecretResult, field: InlineSecretField): string {
+  if (field === "referenceId") {
+    if (result.credentialType !== "api_key") {
+      throw new CliError(
+        `Secret ${result.secret.providerName}/${result.secret.name} is a login credential. Select username, password, or loginUrl.`
+      );
+    }
+
+    if (typeof result.referenceId !== "string" || !result.referenceId.trim()) {
+      throw new CliError(`Secret ${result.secret.providerName}/${result.secret.name} does not have a referenceId value.`);
+    }
+
+    return result.referenceId;
+  }
+
+  if (field === "value") {
+    if (result.credentialType !== "api_key") {
+      throw new CliError(
+        `Secret ${result.secret.providerName}/${result.secret.name} is a login credential. Select username, password, or loginUrl.`
+      );
+    }
+
+    return result.value;
+  }
+
+  if (result.credentialType !== "login_credential") {
+    throw new CliError(
+      `Secret ${result.secret.providerName}/${result.secret.name} is an API key. Select value or referenceId.`
+    );
+  }
+
+  const value = result.credentials[field];
+  if (typeof value !== "string" || !value.trim()) {
+    throw new CliError(`Secret ${result.secret.providerName}/${result.secret.name} does not have a ${field} value.`);
+  }
+
+  return value;
+}
+
 async function resolveOne(input: {
   runtime: RuntimeContext;
   secret: {
@@ -1442,7 +1687,7 @@ async function resolveOne(input: {
     name: string;
     environment?: string;
   };
-  options?: Record<string, string | boolean>;
+  options?: Record<string, OptionValue>;
 }): Promise<ResolveSecretResult> {
   const contextFields = withConfigContext({
     config: input.runtime.config,
@@ -1493,12 +1738,13 @@ async function runCommand(context: CliContext): Promise<void> {
     throw new CliError("run requires a command after --.", 2);
   }
 
+  const inlineSecrets = optionStrings(context.parsed.options, "secret").map(parseInlineSecretMapping);
   const runtime = await resolveRuntimeContext(context);
-  if (!runtime.configPath || !runtime.config) {
-    throw new CliError(`run requires a ${projectConfigFileName} project config.`, 2);
+  if (!runtime.configPath && inlineSecrets.length === 0) {
+    throw new CliError(`run requires a ${projectConfigFileName} project config or at least one --secret mapping.`, 2);
   }
 
-  const secrets = runtime.config.secrets ?? {};
+  const secrets = runtime.config?.secrets ?? {};
   const mappedSecrets: Record<string, string> = {};
 
   for (const [envName, mapping] of Object.entries(secrets)) {
@@ -1510,6 +1756,15 @@ async function runCommand(context: CliContext): Promise<void> {
     mappedSecrets[envName] = serializeSecretValue(result);
   }
 
+  for (const inlineSecret of inlineSecrets) {
+    const result = await resolveOne({
+      runtime,
+      secret: inlineSecret.mapping,
+      options: context.parsed.options
+    });
+    mappedSecrets[inlineSecret.envName] = serializeInlineSecretValue(result, inlineSecret.mapping.field);
+  }
+
   const childEnv = createChildEnvWithMappedSecrets(context.env, mappedSecrets);
 
   const [command, ...args] = context.parsed.afterDoubleDash;
@@ -1518,6 +1773,11 @@ async function runCommand(context: CliContext): Promise<void> {
     env: childEnv,
     cwd: context.cwd
   });
+
+  for (const envName of Object.keys(mappedSecrets)) {
+    delete mappedSecrets[envName];
+    delete childEnv[envName];
+  }
 
   const exitCode = await new Promise<number>((resolve, reject) => {
     child.on("error", reject);

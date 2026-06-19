@@ -34,17 +34,19 @@ scopehold agent provision --url "<provisioning-url>" --token "<one-time-token>" 
 scopehold status --profile "<profile>"
 scopehold inventory --profile "<profile>"
 scopehold resolve openai/api_key --profile "<profile>"
+scopehold run --secret DATABASE_URL=supabase/database_url -- npx prisma migrate deploy
 scopehold run -- npm test
 scopehold version
+scopehold update --check
 scopehold update
 scopehold disconnect --profile "<profile>"
 ```
 
-`scopehold update` checks npm and prints the recommended update command when a newer CLI is available:
+`scopehold update` checks npm and installs the latest global CLI when a newer version is available. Use `--check` when you only want to know whether you are behind:
 
 ```text
-Current: 0.3.1
-Latest:  0.3.2
+Current: 0.4.0
+Latest:  0.4.1
 
 Update available:
 npm install -g @scopehold/cli@latest
@@ -118,7 +120,36 @@ Do not store Agent Keys, OAuth tokens, provider secret values, database URLs, or
 
 ## Run
 
-`scopehold run` resolves the mapped secrets in `.scopehold.json`, injects them into the child process environment, and does not write resolved values to disk:
+`scopehold run` resolves secrets, injects them into the child process environment, and does not write resolved values to disk. For one-off commands, use inline `--secret` mappings:
+
+```sh
+scopehold run --secret DATABASE_URL=supabase/database_url -- npx prisma migrate deploy
+scopehold run --secret RESEND_API_KEY=resend/api -- node scripts/check-email.js
+```
+
+Use the environment variable name the target tool already reads. Multiple inline mappings are supported:
+
+```sh
+scopehold run \
+  --secret SUPABASE_KEY=supabase/service_role \
+  --secret RESEND_API_KEY=resend/api \
+  -- node scripts/check-supabase-and-email.js
+```
+
+The value after `=` is a locator, not a secret, so it is safe in shell history. Field selection is available with `provider/name:field`; supported fields are `value`, `username`, `password`, `loginUrl`, and `referenceId`:
+
+```sh
+scopehold run --secret DB_PASSWORD=supabase/db:password -- npm test
+```
+
+Commands run as argv by default, not through a shell. If the command needs shell interpolation, invoke the shell explicitly after `--` and single-quote the program so your outer shell does not expand the variable before ScopeHold injects it:
+
+```sh
+scopehold run --secret SUPABASE_KEY=supabase/service_role -- \
+  sh -c 'curl https://example.com -H "Authorization: Bearer $SUPABASE_KEY"'
+```
+
+For repeated workflows, keep non-secret mappings in `.scopehold.json`:
 
 ```sh
 scopehold run -- npm test
@@ -128,7 +159,7 @@ scopehold run -- npm test
 
 The API can mirror the underlying resolve calls, but it cannot launch a local process or inject environment variables by itself. API-only agents can reproduce the outcome by resolving each required secret through `/resolve` and setting environment variables in their own runtime.
 
-The CLI removes ScopeHold token environment variables before launching the child process. Only the secrets mapped in `.scopehold.json` are added to the child process environment.
+The CLI removes ScopeHold token environment variables before launching the child process. Inline mappings merge with `.scopehold.json` and override config mappings or inherited environment variables with the same name.
 
 ## Agent Skill
 
