@@ -13,8 +13,8 @@ Use ScopeHold to resolve only the secrets required for the current task. Never a
 - Store long-lived Agent Keys only through the official ScopeHold CLI profile flow or the runtime's secure secret store.
 - Store project context in `.scopehold.json` only when it contains no secrets.
 - Prefer `scopehold inventory` before resolving so you only request task-required secrets.
-- Prefer `scopehold run` when `.scopehold.json` maps the required secrets and the target command can receive secrets through environment variables (the `exec` alias still works).
-- Use `scopehold resolve` only when a secret value is required for the current task.
+- Prefer `scopehold run` for commands that can receive secrets through environment variables. Use inline `--secret` for one-off commands and `.scopehold.json` mappings for repeated workflows.
+- Use `scopehold resolve` only as a last resort when a task genuinely requires reading a secret value directly.
 - If access is denied or a secret is missing, ask the human to grant access in ScopeHold.
 
 ## Provisioning
@@ -71,19 +71,43 @@ The file must not contain Agent Keys, provider secret values, OAuth credentials,
 
 ## Normal Use
 
+Requires ScopeHold CLI 0.4.0 or newer for inline `--secret`. If `--secret` is unavailable, run `scopehold update` or `npm install -g @scopehold/cli@latest`.
+
 List accessible secrets:
 
 ```sh
 scopehold inventory
 ```
 
-Run a command with mapped secrets injected:
+Run a one-off command with a secret injected:
+
+```sh
+scopehold run --secret DATABASE_URL=supabase/database_url -- npx prisma migrate deploy
+```
+
+Use the environment variable name the target tool reads. For multiple secrets:
+
+```sh
+scopehold run \
+  --secret SUPABASE_KEY=supabase/service_role \
+  --secret RESEND_API_KEY=resend/api \
+  -- node scripts/check-supabase-and-email.js
+```
+
+If the command needs shell interpolation, invoke the shell explicitly after `--` and single-quote the program so the outer shell does not expand the variable too early:
+
+```sh
+scopehold run --secret SUPABASE_KEY=supabase/service_role -- \
+  sh -c 'curl https://example.com -H "Authorization: Bearer $SUPABASE_KEY"'
+```
+
+Run a command with `.scopehold.json` mapped secrets injected:
 
 ```sh
 scopehold run -- npm test
 ```
 
-Resolve one specific secret:
+Resolve one specific secret only as a last resort:
 
 ```sh
 scopehold resolve openai/api_key

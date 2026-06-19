@@ -1,17 +1,22 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { readFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 
 const cliPath = path.resolve("dist/index.js");
 const packageJson = JSON.parse(await readFile(path.resolve("package.json"), "utf8"));
 const currentVersion = packageJson.version;
 
-function runCli(args) {
+function runCli(args, input = {}) {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [cliPath, ...args], {
       cwd: process.cwd(),
+      env: {
+        ...process.env,
+        ...(input.env ?? {})
+      },
       stdio: ["ignore", "pipe", "pipe"]
     });
 
@@ -91,7 +96,7 @@ assert.equal(versionCommand.stderr, "");
 
 const currentRegistry = await listen(currentVersion);
 try {
-  const currentUpdate = await runCli(["update", "--registry-url", currentRegistry.registryUrl]);
+  const currentUpdate = await runCli(["update", "--check", "--registry-url", currentRegistry.registryUrl]);
   assert.equal(currentUpdate.code, 0);
   assert.match(currentUpdate.stdout, new RegExp(`Current: ${currentVersion}`));
   assert.match(currentUpdate.stdout, new RegExp(`Latest:  ${currentVersion}`));
@@ -105,15 +110,60 @@ try {
 const nextVersion = "999.0.0";
 const nextRegistry = await listen(nextVersion);
 try {
-  const updateAvailable = await runCli(["update", "--registry-url", nextRegistry.registryUrl, "--json"]);
+  const updateAvailable = await runCli(["update", "--check", "--registry-url", nextRegistry.registryUrl, "--json"]);
   assert.equal(updateAvailable.code, 0);
   assert.deepEqual(JSON.parse(updateAvailable.stdout), {
     current: currentVersion,
     latest: nextVersion,
     updateAvailable: true,
-    installCommand: "npm install -g @scopehold/cli@latest"
+    installCommand: `npm install -g @scopehold/cli@latest --registry ${nextRegistry.registryUrl}`,
+    updated: false
   });
   assert.equal(updateAvailable.stderr, "");
 } finally {
   await nextRegistry.close();
+}
+
+const installRegistry = await listen(nextVersion);
+const fakeBinDir = await mkdtemp(path.join(tmpdir(), "scopehold-cli-fake-npm-"));
+const npmArgsPath = path.join(fakeBinDir, "npm-args.json");
+const fakeNpmPath = path.join(fakeBinDir, "npm");
+try {
+  await writeFile(
+    fakeNpmPath,
+    `#!/usr/bin/env node\nconst { writeFileSync } = require("node:fs");\nwriteFileSync(${JSON.stringify(npmArgsPath)}, JSON.stringify(process.argv.slice(2)));\n`,
+    "utf8"
+  );
+  await chmod(fakeNpmPath, 0o755);
+
+  const updateResult = await runCli(["update", "--registry-url", installRegistry.registryUrl, "--json"], {
+    env: {
+      PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+    }
+  });
+  assert.equal(updateResult.code, 0);
+  assert.deepEqual(JSON.parse(updateResult.stdout), {
+    current: currentVersion,
+    latest: nextVersion,
+    updateAvailable: true,
+    installCommand: `npm install -g @scopehold/cli@latest --registry ${installRegistry.registryUrl}`,
+    updated: true,
+    updatedVersion: nextVersion,
+    manualCommand: null,
+    error: null
+  });
+  assert.equal(updateResult.stderr, "");
+  assert.deepEqual(JSON.parse(await readFile(npmArgsPath, "utf8")), [
+    "install",
+    "-g",
+    "@scopehold/cli@latest",
+    "--registry",
+    installRegistry.registryUrl
+  ]);
+} finally {
+  await installRegistry.close();
+  await rm(fakeBinDir, {
+    recursive: true,
+    force: true
+  });
 }

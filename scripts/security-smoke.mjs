@@ -10,6 +10,9 @@ const cliPath = path.resolve("dist/index.js");
 const fakeAgentKey = `agt_${"1234567890abcdef".repeat(3)}`;
 const fakeProvisioningToken = `agp_${"abcdef1234567890".repeat(3)}`;
 const fakeSecretValue = "fake-secret-value-from-test";
+const fakeInlineSecretValue = "inline-secret-value-from-test";
+const fakeInlineReferenceId = "ref_inline_access_key_id";
+const fakeDbPassword = "inline-db-password-from-test";
 
 function runCli(args, input = {}) {
   return new Promise((resolve) => {
@@ -83,22 +86,64 @@ async function listen() {
     }
 
     if (request.method === "POST" && url.pathname === "/resolve") {
+      let body = {};
+      for await (const chunk of request) {
+        body = JSON.parse(String(chunk));
+      }
+
+      if (body.provider === "missing") {
+        response.writeHead(404, {
+          "Content-Type": "application/json"
+        });
+        response.end(JSON.stringify({ error: "Secret could not be resolved." }));
+        return;
+      }
+
+      if (body.provider === "supabase" && body.name === "db") {
+        response.writeHead(200, {
+          "Content-Type": "application/json"
+        });
+        response.end(
+          JSON.stringify({
+            credentialType: "login_credential",
+            credentials: {
+              username: "postgres",
+              password: fakeDbPassword,
+              loginUrl: "https://database.example.com"
+            },
+            secret: {
+              id: "secret_login_test",
+              kind: "login_credential",
+              name: "db",
+              environment: null,
+              scopeKind: "project",
+              providerId: "provider_supabase",
+              providerName: "supabase",
+              providerDisplayName: "Supabase",
+              version: 1
+            }
+          })
+        );
+        return;
+      }
+
       response.writeHead(200, {
         "Content-Type": "application/json"
       });
       response.end(
         JSON.stringify({
           credentialType: "api_key",
-          value: fakeSecretValue,
+          value: body.provider === "inline" ? fakeInlineSecretValue : fakeSecretValue,
+          referenceId: body.provider === "inline" ? fakeInlineReferenceId : null,
           secret: {
-            id: "secret_test",
+            id: body.provider === "inline" ? "secret_inline_test" : "secret_test",
             kind: "api_key",
-            name: "api_key",
+            name: body.name ?? "api_key",
             environment: null,
             scopeKind: "project",
-            providerId: "provider_test",
-            providerName: "stripe",
-            providerDisplayName: "Stripe",
+            providerId: body.provider === "inline" ? "provider_inline" : "provider_test",
+            providerName: body.provider ?? "stripe",
+            providerDisplayName: body.provider === "inline" ? "Inline" : "Stripe",
             version: 1
           }
         })
@@ -237,6 +282,120 @@ async function main() {
     assert.equal(runResult.code, 0);
     assert.equal(runResult.stdout, `${fakeSecretValue}||`);
     assert.equal(runResult.stderr, "");
+
+    const inlineWithoutConfig = await runCli(
+      [
+        "run",
+        "--profile",
+        "test-profile",
+        "--secret",
+        "INLINE_SECRET=inline/api_key",
+        "--secret",
+        "DB_PASSWORD=supabase/db:password",
+        "--secret",
+        "SECRET_REFERENCE=inline/api_key:referenceId",
+        "--",
+        process.execPath,
+        "-e",
+        "process.stdout.write([process.env.INLINE_SECRET, process.env.DB_PASSWORD, process.env.SECRET_REFERENCE].join('|'))"
+      ],
+      {
+        homeDir
+      }
+    );
+
+    assert.equal(inlineWithoutConfig.code, 0);
+    assert.equal(inlineWithoutConfig.stdout, `${fakeInlineSecretValue}|${fakeDbPassword}|${fakeInlineReferenceId}`);
+    assert.equal(inlineWithoutConfig.stderr, "");
+
+    const loginReferenceId = await runCli(
+      [
+        "run",
+        "--profile",
+        "test-profile",
+        "--secret",
+        "LOGIN_REFERENCE=supabase/db:referenceId",
+        "--",
+        process.execPath,
+        "-e",
+        "process.stdout.write('child-ran')"
+      ],
+      {
+        homeDir
+      }
+    );
+
+    assert.equal(loginReferenceId.code, 1);
+    assert.equal(loginReferenceId.stdout, "");
+    assert.match(loginReferenceId.stderr, /login credential/);
+
+    const inlineOverridesConfig = await runCli(
+      [
+        "run",
+        "--profile",
+        "test-profile",
+        "--secret",
+        "TEST_SECRET=inline/api_key",
+        "--",
+        process.execPath,
+        "-e",
+        "process.stdout.write(process.env.TEST_SECRET || '')"
+      ],
+      {
+        homeDir,
+        cwd: projectDir
+      }
+    );
+
+    assert.equal(inlineOverridesConfig.code, 0);
+    assert.equal(inlineOverridesConfig.stdout, fakeInlineSecretValue);
+    assert.equal(inlineOverridesConfig.stderr, "");
+
+    const inlineWinsOverInheritedEnv = await runCli(
+      [
+        "run",
+        "--profile",
+        "test-profile",
+        "--secret",
+        "INLINE_SECRET=inline/api_key",
+        "--",
+        process.execPath,
+        "-e",
+        "process.stdout.write(process.env.INLINE_SECRET || '')"
+      ],
+      {
+        homeDir,
+        env: {
+          INLINE_SECRET: "inherited-value-should-not-win"
+        }
+      }
+    );
+
+    assert.equal(inlineWinsOverInheritedEnv.code, 0);
+    assert.equal(inlineWinsOverInheritedEnv.stdout, fakeInlineSecretValue);
+    assert.equal(inlineWinsOverInheritedEnv.stderr, "");
+
+    const failFast = await runCli(
+      [
+        "run",
+        "--profile",
+        "test-profile",
+        "--secret",
+        "MISSING_SECRET=missing/api_key",
+        "--",
+        process.execPath,
+        "-e",
+        "process.stdout.write('child-ran')"
+      ],
+      {
+        homeDir
+      }
+    );
+
+    assert.equal(failFast.code, 1);
+    assert.equal(failFast.stdout, "");
+    assert.equal(failFast.stderr.includes(fakeAgentKey), false);
+    assert.match(failFast.stderr, /Secret could not be resolved/);
   } finally {
     await server.close();
     await rm(homeDir, {

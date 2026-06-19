@@ -38,6 +38,7 @@ interface ResolveSecretMetadata {
 export interface ResolveApiKeySecretResult {
   credentialType: "api_key";
   value: string;
+  referenceId?: string | null;
   secret: ResolveSecretMetadata & {
     kind: "api_key";
   };
@@ -202,7 +203,16 @@ function assertResolveResult(payload: unknown): ResolveSecretResult {
   }
 
   if (result.credentialType === "api_key") {
-    if (typeof (result as Partial<ResolveApiKeySecretResult>).value !== "string") {
+    const apiKeyResult = result as Partial<ResolveApiKeySecretResult>;
+
+    if (
+      typeof apiKeyResult.value !== "string" ||
+      !(
+        apiKeyResult.referenceId === undefined ||
+        typeof apiKeyResult.referenceId === "string" ||
+        apiKeyResult.referenceId === null
+      )
+    ) {
       throw new ScopeHoldResolveError(502, "Resolve response was invalid.");
     }
 
