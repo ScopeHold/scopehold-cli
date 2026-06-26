@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import { access, chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { hostname, homedir } from "node:os";
@@ -14,6 +15,8 @@ import { createChildEnvWithMappedSecrets, redactSensitiveText } from "./security
 type CommandHandler = (context: CliContext) => Promise<void>;
 
 type OptionValue = string | boolean | string[];
+type RunCommandAlias = "run" | "exec";
+type AgentRunEvent = "start" | "complete" | "failed" | "aborted";
 
 type ParsedArgs = {
   command: string | null;
@@ -1680,6 +1683,78 @@ function serializeInlineSecretValue(result: ResolveSecretResult, field: InlineSe
   return value;
 }
 
+function generatedRunId(): string {
+  return `run_${randomUUID()}`;
+}
+
+function runCommandAlias(command: string | null): RunCommandAlias {
+  return command === "exec" ? "exec" : "run";
+}
+
+function summarizeCommand(command: string, args: string[]): string {
+  const commandName = path.basename(command) || command;
+  const argLabel = args.length === 1 ? "arg" : "args";
+  return `${commandName} (+${args.length} ${argLabel})`.slice(0, 160);
+}
+
+function uniqueSecretEnvNames(
+  configSecrets: Record<string, SecretMapping>,
+  inlineSecrets: Array<{ envName: string; mapping: InlineSecretMapping }>
+): string[] {
+  const names = new Set<string>();
+
+  for (const envName of Object.keys(configSecrets)) {
+    if (!envNamePattern.test(envName)) {
+      throw new CliError(`${projectConfigFileName} secret environment name "${envName}" is invalid. Use a shell-safe env var name.`, 2);
+    }
+
+    names.add(envName);
+  }
+
+  for (const inlineSecret of inlineSecrets) {
+    names.add(inlineSecret.envName);
+  }
+
+  return [...names];
+}
+
+async function recordAgentRunEvent(input: {
+  runtime: RuntimeContext;
+  options: Record<string, OptionValue>;
+  runId: string;
+  event: AgentRunEvent;
+  commandAlias: RunCommandAlias;
+  commandSummary: string;
+  secretEnvNames: string[];
+  durationMs?: number;
+  exitCode?: number;
+}): Promise<void> {
+  const contextFields = withConfigContext({
+    config: input.runtime.config,
+    options: input.options
+  });
+
+  await fetchJson({
+    apiUrl: input.runtime.apiUrl,
+    path: "/agent-runs/events",
+    method: "POST",
+    token: input.runtime.token,
+    body: {
+      event: input.event,
+      runId: input.runId,
+      source: "scopehold_run",
+      commandAlias: input.commandAlias,
+      commandSummary: input.commandSummary,
+      secretEnvNames: input.secretEnvNames,
+      durationMs: input.durationMs,
+      exitCode: input.exitCode,
+      taskId: optionString(input.options, "task-id"),
+      purpose: optionString(input.options, "purpose"),
+      ...contextFields
+    }
+  });
+}
+
 async function resolveOne(input: {
   runtime: RuntimeContext;
   secret: {
@@ -1688,6 +1763,10 @@ async function resolveOne(input: {
     environment?: string;
   };
   options?: Record<string, OptionValue>;
+  runMetadata?: {
+    commandAlias: RunCommandAlias;
+    runId: string;
+  };
 }): Promise<ResolveSecretResult> {
   const contextFields = withConfigContext({
     config: input.runtime.config,
@@ -1702,7 +1781,9 @@ async function resolveOne(input: {
     environment: input.secret.environment,
     clientId: optionString(input.options ?? {}, "client-id") ?? input.runtime.profileName,
     taskId: optionString(input.options ?? {}, "task-id"),
-    source: optionString(input.options ?? {}, "source") ?? "cli",
+    source: input.runMetadata ? "scopehold_run" : optionString(input.options ?? {}, "source") ?? "cli",
+    commandAlias: input.runMetadata?.commandAlias,
+    runId: input.runMetadata?.runId,
     purpose: optionString(input.options ?? {}, "purpose"),
     ...contextFields
   });
@@ -1738,6 +1819,11 @@ async function runCommand(context: CliContext): Promise<void> {
     throw new CliError("run requires a command after --.", 2);
   }
 
+  const [command, ...args] = context.parsed.afterDoubleDash;
+  if (!command) {
+    throw new CliError("run requires a command after --.", 2);
+  }
+
   const inlineSecrets = optionStrings(context.parsed.options, "secret").map(parseInlineSecretMapping);
   const runtime = await resolveRuntimeContext(context);
   if (!runtime.configPath && inlineSecrets.length === 0) {
@@ -1745,46 +1831,118 @@ async function runCommand(context: CliContext): Promise<void> {
   }
 
   const secrets = runtime.config?.secrets ?? {};
+  const runId = generatedRunId();
+  const commandAlias = runCommandAlias(context.parsed.command);
+  const commandSummary = summarizeCommand(command, args);
+  const secretEnvNames = uniqueSecretEnvNames(secrets, inlineSecrets);
+  const startedAt = Date.now();
+  let started = false;
+  let childExited = false;
+  let finalEventRecorded = false;
   const mappedSecrets: Record<string, string> = {};
 
-  for (const [envName, mapping] of Object.entries(secrets)) {
-    const result = await resolveOne({
+  try {
+    await recordAgentRunEvent({
       runtime,
-      secret: mapping,
-      options: context.parsed.options
+      options: context.parsed.options,
+      runId,
+      event: "start",
+      commandAlias,
+      commandSummary,
+      secretEnvNames
     });
-    mappedSecrets[envName] = serializeSecretValue(result);
-  }
+    started = true;
 
-  for (const inlineSecret of inlineSecrets) {
-    const result = await resolveOne({
+    for (const [envName, mapping] of Object.entries(secrets)) {
+      const result = await resolveOne({
+        runtime,
+        secret: mapping,
+        options: context.parsed.options,
+        runMetadata: {
+          commandAlias,
+          runId
+        }
+      });
+      mappedSecrets[envName] = serializeSecretValue(result);
+    }
+
+    for (const inlineSecret of inlineSecrets) {
+      const result = await resolveOne({
+        runtime,
+        secret: inlineSecret.mapping,
+        options: context.parsed.options,
+        runMetadata: {
+          commandAlias,
+          runId
+        }
+      });
+      mappedSecrets[inlineSecret.envName] = serializeInlineSecretValue(result, inlineSecret.mapping.field);
+    }
+
+    const childEnv = createChildEnvWithMappedSecrets(context.env, mappedSecrets);
+
+    const child = spawn(command, args, {
+      stdio: "inherit",
+      env: childEnv,
+      cwd: context.cwd
+    });
+
+    for (const envName of Object.keys(mappedSecrets)) {
+      delete mappedSecrets[envName];
+      delete childEnv[envName];
+    }
+
+    const childResult = await new Promise<{ exitCode: number; signal: NodeJS.Signals | null }>((resolve, reject) => {
+      child.on("error", reject);
+      child.on("close", (code, signal) =>
+        resolve({
+          exitCode: code ?? 1,
+          signal
+        })
+      );
+    });
+    childExited = true;
+
+    const event: AgentRunEvent =
+      childResult.signal === null ? (childResult.exitCode === 0 ? "complete" : "failed") : "aborted";
+    await recordAgentRunEvent({
       runtime,
-      secret: inlineSecret.mapping,
-      options: context.parsed.options
+      options: context.parsed.options,
+      runId,
+      event,
+      commandAlias,
+      commandSummary,
+      secretEnvNames,
+      durationMs: Date.now() - startedAt,
+      exitCode: childResult.signal === null ? childResult.exitCode : undefined
     });
-    mappedSecrets[inlineSecret.envName] = serializeInlineSecretValue(result, inlineSecret.mapping.field);
+    finalEventRecorded = true;
+
+    process.exit(childResult.exitCode);
+  } catch (error) {
+    for (const envName of Object.keys(mappedSecrets)) {
+      delete mappedSecrets[envName];
+    }
+
+    if (started && !childExited && !finalEventRecorded) {
+      try {
+        await recordAgentRunEvent({
+          runtime,
+          options: context.parsed.options,
+          runId,
+          event: "failed",
+          commandAlias,
+          commandSummary,
+          secretEnvNames,
+          durationMs: Date.now() - startedAt
+        });
+      } catch {
+        // Preserve the original failure; the CLI caller should see why the run failed.
+      }
+    }
+
+    throw error;
   }
-
-  const childEnv = createChildEnvWithMappedSecrets(context.env, mappedSecrets);
-
-  const [command, ...args] = context.parsed.afterDoubleDash;
-  const child = spawn(command!, args, {
-    stdio: "inherit",
-    env: childEnv,
-    cwd: context.cwd
-  });
-
-  for (const envName of Object.keys(mappedSecrets)) {
-    delete mappedSecrets[envName];
-    delete childEnv[envName];
-  }
-
-  const exitCode = await new Promise<number>((resolve, reject) => {
-    child.on("error", reject);
-    child.on("close", (code) => resolve(code ?? 1));
-  });
-
-  process.exit(exitCode);
 }
 
 async function agentCommand(context: CliContext): Promise<void> {

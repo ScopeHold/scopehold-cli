@@ -161,6 +161,8 @@ The API can mirror the underlying resolve calls, but it cannot launch a local pr
 
 The CLI removes ScopeHold token environment variables before launching the child process. Inline mappings merge with `.scopehold.json` and override config mappings or inherited environment variables with the same name.
 
+Each `scopehold run` invocation receives a ScopeHold-generated `runId` in the audit log. The run audit records start/completion status, exit code, duration, and injected environment variable names, and each secret resolve during that invocation is tied to the same `runId`. It does not record secret values, child process output, or downstream API calls made by the command.
+
 ## Agent Skill
 
 The npm package includes reusable ScopeHold Agent Guidance at:

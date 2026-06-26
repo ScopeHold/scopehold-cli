@@ -14,6 +14,15 @@ const fakeInlineSecretValue = "inline-secret-value-from-test";
 const fakeInlineReferenceId = "ref_inline_access_key_id";
 const fakeDbPassword = "inline-db-password-from-test";
 
+function assertNoSecretLeak(payload) {
+  const text = JSON.stringify(payload);
+  assert.equal(text.includes(fakeSecretValue), false);
+  assert.equal(text.includes(fakeInlineSecretValue), false);
+  assert.equal(text.includes(fakeDbPassword), false);
+  assert.equal(text.includes(fakeAgentKey), false);
+  assert.equal(text.includes(fakeProvisioningToken), false);
+}
+
 function runCli(args, input = {}) {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [cliPath, ...args], {
@@ -54,6 +63,11 @@ async function fileMode(filePath) {
 }
 
 async function listen() {
+  const state = {
+    agentRunEvents: [],
+    resolveRequests: []
+  };
+
   const server = createServer(async (request, response) => {
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
 
@@ -90,6 +104,7 @@ async function listen() {
       for await (const chunk of request) {
         body = JSON.parse(String(chunk));
       }
+      state.resolveRequests.push(body);
 
       if (body.provider === "missing") {
         response.writeHead(404, {
@@ -151,6 +166,20 @@ async function listen() {
       return;
     }
 
+    if (request.method === "POST" && url.pathname === "/agent-runs/events") {
+      let body = {};
+      for await (const chunk of request) {
+        body = JSON.parse(String(chunk));
+      }
+      state.agentRunEvents.push(body);
+
+      response.writeHead(200, {
+        "Content-Type": "application/json"
+      });
+      response.end(JSON.stringify({ ok: true }));
+      return;
+    }
+
     response.writeHead(404, {
       "Content-Type": "application/json"
     });
@@ -163,6 +192,7 @@ async function listen() {
 
   return {
     apiUrl: `http://127.0.0.1:${address.port}`,
+    state,
     close: () =>
       new Promise((resolve, reject) => {
         server.close((error) => {
@@ -242,6 +272,8 @@ async function main() {
       )
     );
 
+    const execEventStart = server.state.agentRunEvents.length;
+    const execResolveStart = server.state.resolveRequests.length;
     const execResult = await runCli(
       [
         "exec",
@@ -261,8 +293,26 @@ async function main() {
     assert.equal(execResult.code, 0);
     assert.equal(execResult.stdout, `${fakeSecretValue}||`);
     assert.equal(execResult.stderr, "");
+    const execEvents = server.state.agentRunEvents.slice(execEventStart);
+    const execResolves = server.state.resolveRequests.slice(execResolveStart);
+    assert.deepEqual(execEvents.map((event) => event.event), ["start", "complete"]);
+    assert.equal(execEvents[0].source, "scopehold_run");
+    assert.equal(execEvents[0].commandAlias, "exec");
+    assert.match(execEvents[0].runId, /^run_[a-f0-9-]{36}$/);
+    assert.deepEqual(execEvents[0].secretEnvNames, ["TEST_SECRET"]);
+    assert.equal(execEvents[1].runId, execEvents[0].runId);
+    assert.equal(execEvents[1].exitCode, 0);
+    assert.equal(typeof execEvents[1].durationMs, "number");
+    assert.equal(execResolves.length, 1);
+    assert.equal(execResolves[0].source, "scopehold_run");
+    assert.equal(execResolves[0].commandAlias, "exec");
+    assert.equal(execResolves[0].runId, execEvents[0].runId);
+    assertNoSecretLeak(execEvents);
+    assertNoSecretLeak(execResolves);
 
     // D-023: `run` is the documented verb and must behave identically to `exec`.
+    const runEventStart = server.state.agentRunEvents.length;
+    const runResolveStart = server.state.resolveRequests.length;
     const runResult = await runCli(
       [
         "run",
@@ -282,6 +332,21 @@ async function main() {
     assert.equal(runResult.code, 0);
     assert.equal(runResult.stdout, `${fakeSecretValue}||`);
     assert.equal(runResult.stderr, "");
+    const runEvents = server.state.agentRunEvents.slice(runEventStart);
+    const runResolves = server.state.resolveRequests.slice(runResolveStart);
+    assert.deepEqual(runEvents.map((event) => event.event), ["start", "complete"]);
+    assert.equal(runEvents[0].source, "scopehold_run");
+    assert.equal(runEvents[0].commandAlias, "run");
+    assert.match(runEvents[0].runId, /^run_[a-f0-9-]{36}$/);
+    assert.deepEqual(runEvents[0].secretEnvNames, ["TEST_SECRET"]);
+    assert.equal(runEvents[1].runId, runEvents[0].runId);
+    assert.equal(runEvents[1].exitCode, 0);
+    assert.equal(runResolves.length, 1);
+    assert.equal(runResolves[0].source, "scopehold_run");
+    assert.equal(runResolves[0].commandAlias, "run");
+    assert.equal(runResolves[0].runId, runEvents[0].runId);
+    assertNoSecretLeak(runEvents);
+    assertNoSecretLeak(runResolves);
 
     const inlineWithoutConfig = await runCli(
       [
@@ -375,6 +440,8 @@ async function main() {
     assert.equal(inlineWinsOverInheritedEnv.stdout, fakeInlineSecretValue);
     assert.equal(inlineWinsOverInheritedEnv.stderr, "");
 
+    const failEventStart = server.state.agentRunEvents.length;
+    const failResolveStart = server.state.resolveRequests.length;
     const failFast = await runCli(
       [
         "run",
@@ -396,6 +463,18 @@ async function main() {
     assert.equal(failFast.stdout, "");
     assert.equal(failFast.stderr.includes(fakeAgentKey), false);
     assert.match(failFast.stderr, /Secret could not be resolved/);
+    const failEvents = server.state.agentRunEvents.slice(failEventStart);
+    const failResolves = server.state.resolveRequests.slice(failResolveStart);
+    assert.deepEqual(failEvents.map((event) => event.event), ["start", "failed"]);
+    assert.equal(failEvents[0].commandAlias, "run");
+    assert.deepEqual(failEvents[0].secretEnvNames, ["MISSING_SECRET"]);
+    assert.equal(failEvents[1].runId, failEvents[0].runId);
+    assert.equal(typeof failEvents[1].durationMs, "number");
+    assert.equal(failResolves.at(-1).runId, failEvents[0].runId);
+    assert.equal(failResolves.at(-1).source, "scopehold_run");
+    assert.equal(failResolves.at(-1).commandAlias, "run");
+    assertNoSecretLeak(failEvents);
+    assertNoSecretLeak(failResolves);
   } finally {
     await server.close();
     await rm(homeDir, {
