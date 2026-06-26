@@ -11,6 +11,8 @@ export interface ResolveSecretInput {
   clientId?: string;
   taskId?: string;
   source?: string;
+  commandAlias?: "run" | "exec";
+  runId?: string;
   purpose?: string;
   fetchImpl?: ResolveFetch;
 }
@@ -113,6 +115,8 @@ function bodyWithoutUndefined(input: ResolveSecretInput): Record<string, string>
     clientId: optional(input.clientId),
     taskId: optional(input.taskId),
     source: optional(input.source),
+    commandAlias: optional(input.commandAlias),
+    runId: optional(input.runId),
     purpose: optional(input.purpose)
   };
 
