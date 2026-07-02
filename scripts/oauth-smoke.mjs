@@ -248,8 +248,18 @@ async function main() {
     );
 
     assert.equal(connect.code, 0);
-    assert.match(connect.stdout, /User code: TEST-CODE/);
-    assert.match(connect.stdout, /https:\/\/scopehold\.com\/authorize-agent\?code=TEST-CODE/);
+    assert.equal(
+      connect.stdout.split(/\r?\n/)[0],
+      "Open: https://scopehold.com/authorize-agent?code=TEST-CODE | Code: TEST-CODE",
+    );
+    assert.match(
+      connect.stdout,
+      /Waiting for approval\. Open: https:\/\/scopehold\.com\/authorize-agent\?code=TEST-CODE \| Code: TEST-CODE/,
+    );
+    assert.match(
+      connect.stdout,
+      /Still waiting for approval\. Open: https:\/\/scopehold\.com\/authorize-agent\?code=TEST-CODE \| Code: TEST-CODE/,
+    );
     assert.equal(connect.stdout.includes(deviceCode), false);
     assert.equal(connect.stdout.includes(accessToken1), false);
     assert.equal(connect.stdout.includes(refreshToken1), false);

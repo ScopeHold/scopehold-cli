@@ -665,6 +665,10 @@ function isInteractiveStream(stream: NodeJS.WriteStream): boolean {
   return stream.isTTY === true;
 }
 
+function authorizationPointer(input: { approvalUrl: string; userCode: string }): string {
+  return `Open: ${input.approvalUrl} | Code: ${input.userCode}`;
+}
+
 async function openBrowser(url: string): Promise<boolean> {
   const command =
     process.platform === "darwin" ? "open" : process.platform === "win32" ? "cmd" : "xdg-open";
@@ -1313,6 +1317,7 @@ async function startDeviceAuthorization(input: {
 async function pollDeviceToken(input: {
   device: DeviceAuthorizationResponse;
   metadata: OAuthAuthorizationServerMetadata;
+  onWaiting?: () => void;
 }): Promise<OAuthTokenResponse> {
   let intervalSeconds = Math.max(0, input.device.interval ?? 5);
   const expiresAt = Date.now() + input.device.expires_in * 1000;
@@ -1336,11 +1341,13 @@ async function pollDeviceToken(input: {
     const error = typeof response.payload === "object" && response.payload !== null ? (response.payload as OAuthErrorResponse).error : null;
 
     if (error === "authorization_pending") {
+      input.onWaiting?.();
       continue;
     }
 
     if (error === "slow_down") {
       intervalSeconds += 5;
+      input.onWaiting?.();
       continue;
     }
 
@@ -1427,20 +1434,26 @@ async function connectCommand(context: CliContext): Promise<void> {
   const approvalUrl = device.verification_uri_complete ?? device.verification_uri;
 
   const stream = optionBoolean(context.parsed.options, "json") ? context.stderr : context.stdout;
+  const approvalPointer = authorizationPointer({
+    approvalUrl,
+    userCode: device.user_code
+  });
+  stream.write(`${approvalPointer}\n`);
   stream.write("Authorize this ScopeHold CLI profile in your browser.\n");
-  stream.write(`User code: ${device.user_code}\n`);
   if (isInteractiveStream(stream) && (await openBrowser(approvalUrl))) {
     stream.write("Opening browser for approval.\n");
   }
-  stream.write(`Open: ${approvalUrl}\n`);
   if (device.verification_uri_complete) {
-    stream.write(`Or go to ${device.verification_uri} and enter the code above.\n`);
+    stream.write(`Manual fallback: go to ${device.verification_uri} and enter code ${device.user_code}.\n`);
   }
-  stream.write("Waiting for approval...\n");
+  stream.write(`Waiting for approval. ${approvalPointer}\n`);
 
   const tokenResponse = await pollDeviceToken({
     device,
-    metadata
+    metadata,
+    onWaiting: () => {
+      stream.write(`Still waiting for approval. ${approvalPointer}\n`);
+    }
   });
 
   await ensureUserConfig(context.homeDir);

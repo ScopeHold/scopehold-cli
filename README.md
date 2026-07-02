@@ -64,10 +64,13 @@ In an interactive terminal, the command opens the approval URL in your browser.
 It also prints a short user code and URL as a fallback:
 
 ```text
-User code: ABCD-EFGH
+Open: https://scopehold.com/authorize-agent?code=ABCD-EFGH | Code: ABCD-EFGH
+Authorize this ScopeHold CLI profile in your browser.
 Opening browser for approval.
-Open: https://scopehold.com/authorize-agent?code=ABCD-EFGH
+Waiting for approval. Open: https://scopehold.com/authorize-agent?code=ABCD-EFGH | Code: ABCD-EFGH
 ```
+
+If an agent runs `scopehold connect` for you, it must relay the verification URL and code immediately. It should never say it is waiting for authorization without also giving you the approval link and code.
 
 Approve the agent in ScopeHold, choose its project access and token lifetime, then return to the terminal. The CLI stores the returned OAuth credentials in the selected profile and silently refreshes access tokens when the chosen lifetime includes a refresh token.
 
