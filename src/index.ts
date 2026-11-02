@@ -1851,7 +1851,6 @@ async function runCommand(context: CliContext): Promise<void> {
   const startedAt = Date.now();
   let started = false;
   let childExited = false;
-  let finalEventRecorded = false;
   const mappedSecrets: Record<string, string> = {};
 
   try {
@@ -1918,18 +1917,22 @@ async function runCommand(context: CliContext): Promise<void> {
 
     const event: AgentRunEvent =
       childResult.signal === null ? (childResult.exitCode === 0 ? "complete" : "failed") : "aborted";
-    await recordAgentRunEvent({
-      runtime,
-      options: context.parsed.options,
-      runId,
-      event,
-      commandAlias,
-      commandSummary,
-      secretEnvNames,
-      durationMs: Date.now() - startedAt,
-      exitCode: childResult.signal === null ? childResult.exitCode : undefined
-    });
-    finalEventRecorded = true;
+    try {
+      await recordAgentRunEvent({
+        runtime,
+        options: context.parsed.options,
+        runId,
+        event,
+        commandAlias,
+        commandSummary,
+        secretEnvNames,
+        durationMs: Date.now() - startedAt,
+        exitCode: childResult.signal === null ? childResult.exitCode : undefined
+      });
+    } catch {
+      // The child already ran; a missing audit event must not change its result.
+      context.stderr.write("Warning: ScopeHold could not record the final run event. The run may appear unfinished in activity.\n");
+    }
 
     process.exit(childResult.exitCode);
   } catch (error) {
@@ -1937,7 +1940,7 @@ async function runCommand(context: CliContext): Promise<void> {
       delete mappedSecrets[envName];
     }
 
-    if (started && !childExited && !finalEventRecorded) {
+    if (started && !childExited) {
       try {
         await recordAgentRunEvent({
           runtime,
