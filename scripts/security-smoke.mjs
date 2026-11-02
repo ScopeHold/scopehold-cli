@@ -65,7 +65,8 @@ async function fileMode(filePath) {
 async function listen() {
   const state = {
     agentRunEvents: [],
-    resolveRequests: []
+    resolveRequests: [],
+    failFinalEvent: false
   };
 
   const server = createServer(async (request, response) => {
@@ -172,6 +173,11 @@ async function listen() {
         body = JSON.parse(String(chunk));
       }
       state.agentRunEvents.push(body);
+      if (state.failFinalEvent && body.event !== "start") {
+        response.writeHead(500, { "Content-Type": "application/json" });
+        response.end(JSON.stringify({ error: `unsafe upstream detail ${fakeSecretValue}` }));
+        return;
+      }
 
       response.writeHead(200, {
         "Content-Type": "application/json"
@@ -309,6 +315,19 @@ async function main() {
     assert.equal(execResolves[0].runId, execEvents[0].runId);
     assertNoSecretLeak(execEvents);
     assertNoSecretLeak(execResolves);
+
+    // Final event failures are visible, but never replace the child's result.
+    server.state.failFinalEvent = true;
+    for (const [alias, exitCode] of [["run", 0], ["exec", 7]]) {
+      const failedClose = await runCli(
+        [alias, "--profile", "test-profile", "--", process.execPath, "-e", `process.exit(${exitCode})`],
+        { homeDir, cwd: projectDir }
+      );
+      assert.equal(failedClose.code, exitCode);
+      assert.match(failedClose.stderr, /could not record the final run event/);
+      assertNoSecretLeak(failedClose);
+    }
+    server.state.failFinalEvent = false;
 
     // D-023: `run` is the documented verb and must behave identically to `exec`.
     const runEventStart = server.state.agentRunEvents.length;
